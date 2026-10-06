@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Lint, unit tests, typecheck and build
+        run: npm run check
+      - run: npx playwright install --with-deps chromium
+      - name: Smoke test in Chromium
+        run: npm run test:e2e

@@ -14,6 +14,17 @@ Everything runs in your browser on a real Postgres engine ([PGlite](https://pgli
 - [Seed data and examples](docs/DATA.md)
 - [Decision records](docs/decisions/)
 
+## Development
+
+Requires Node.js 20.19+ (CI uses Node 24).
+
+```sh
+npm install
+npm run dev        # local dev server
+npm run check      # lint, unit tests, typecheck, production build
+npm run test:e2e   # browser smoke test (first run: npx playwright install chromium)
+```
+
 ## License
 
 [MIT](LICENSE)
