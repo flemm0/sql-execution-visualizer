@@ -1,0 +1,132 @@
+/* Design tokens. Dark-first; the light theme overrides them. See docs/UX.md. */
+:root {
+  color-scheme: dark;
+  --surface-page: #0a0a0b;
+  --surface-1: #111112;
+  --surface-2: #161617;
+  --border: hsl(0 0% 100% / 0.08);
+  --text-primary: #e2e4e7;
+  --text-secondary: hsl(0 0% 100% / 0.55);
+  --accent-index: #38bdf8;
+  --accent-heap: #fbbf24;
+  --accent-result: #34d399;
+  --accent-intermediate: #a78bfa;
+  --accent-rejected: #f87171;
+  --font-heading: 'Instrument Sans', system-ui, sans-serif;
+  --font-ui: 'Inter', system-ui, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, monospace;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --surface-page: #ffffff;
+    --surface-1: #f8fafc;
+    --surface-2: #f1f5f9;
+    --border: rgb(15 23 42 / 0.12);
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --accent-index: #0284c7;
+    --accent-heap: #b45309;
+    --accent-result: #047857;
+    --accent-intermediate: #7c3aed;
+    --accent-rejected: #dc2626;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--surface-page);
+  color: var(--text-primary);
+  font: 15px/1.6 var(--font-ui);
+}
+
+h1,
+h2 {
+  font-family: var(--font-heading);
+  font-weight: 600;
+  margin: 0 0 0.5rem;
+}
+
+h1 {
+  font-size: 1.75rem;
+}
+
+h2 {
+  font-size: 1rem;
+}
+
+code,
+.mono,
+table {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+}
+
+a {
+  color: var(--accent-index);
+}
+
+.page {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 3rem 1rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.subtitle,
+.muted {
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.error {
+  color: var(--accent-rejected);
+}
+
+.card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+}
+
+.card p {
+  margin: 0;
+}
+
+.accent-index {
+  border-left-color: var(--accent-index);
+}
+
+.accent-heap {
+  border-left-color: var(--accent-heap);
+}
+
+.accent-result {
+  border-left-color: var(--accent-result);
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.25rem 0.75rem 0.25rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  font-family: var(--font-ui);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
