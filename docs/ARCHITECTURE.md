@@ -85,7 +85,11 @@ Holds the trace and the playback position. Supports play/pause, step forward and
 PGlite has no autovacuum. After each write, read `pg_stat_user_tables` and apply Postgres's default autovacuum thresholds (analyze: 50 rows + 10% of the table changed; vacuum: 50 + 20% dead rows; insert-vacuum: 1,000 + 20% inserted). When crossed, run `ANALYZE` / `VACUUM` on that table and show a notice. A setting turns it off. See [ADR 0014](decisions/0014-simulated-autovacuum.md).
 
 ### Persistence and seeding (worker)
-The database is stored in the browser's IndexedDB (PGlite `idb://` data dir). On first load, seed data is generated in SQL from a fixed random seed, then `VACUUM ANALYZE`d. A seed version number is stored; when a new app release changes the seed, the user is offered a reset. **Reset database** restores the seed at any time. If first-load generation is too slow, ship a prebuilt data directory instead (`loadDataDir`).
+The database is stored in the browser's IndexedDB (PGlite data dir `idb://sql-execution-visualizer`). With several tabs open, PGlite elects one tab's worker to run Postgres and the others forward queries to it.
+
+- **First load:** the worker's `init` generates the seed data in SQL from a fixed random seed, then `VACUUM ANALYZE`s it (about a second, so no prebuilt data directory is needed). The seed runs in one transaction, so an interrupted seed leaves nothing behind.
+- **Seed version:** stored in `visualizer.seed_info`, a schema of its own outside `public`. When a release bumps `SEED_VERSION`, the UI offers a reset instead of resetting on its own.
+- **Reset database:** drops every non-system schema (including `public`, which takes `pageinspect` and `pg_buffercache` with it), recreates `public` and the extensions, and seeds again. Pages and `ctid`s come out identical to a first load; transaction IDs (`xmin`) are higher.
 
 ## Hosting and delivery
 
@@ -100,5 +104,5 @@ The database is stored in the browser's IndexedDB (PGlite `idb://` data dir). On
 
 - **Hosting headers.** GitHub Pages cannot set custom HTTP headers. PGlite is expected not to need any (no `SharedArrayBuffer`); M0 verifies this. Fallback: Cloudflare Pages.
 - **Volatile queries.** Steps 2 and 3 execute the query twice. Queries with `random()`, `now()`, etc. may differ between executions; the validator will flag them.
-- **Autovacuum counters.** The autovacuum simulator depends on `pg_stat_user_tables` counters being maintained in PGlite's single-process mode. Verify in M1.
+- **Autovacuum counters.** The autovacuum simulator depends on `pg_stat_user_tables` counters being maintained in PGlite's single-process mode. A first check in M1 looks off: right after the seed's `VACUUM ANALYZE` plus 100 updates, `orders` reports `n_live_tup` 100,000 (twice the real count) and `n_mod_since_analyze` 50,000. To investigate in the autovacuum simulator PR (stats flushing, or counting from `pg_stat_user_tables` deltas ourselves).
 - **Other databases.** MySQL/MariaDB have no maintained browser build. Supporting them later may require a different engine approach; the engine-agnostic trace and visualization keep that option open.

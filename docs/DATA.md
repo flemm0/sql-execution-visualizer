@@ -12,7 +12,19 @@
 
 Foreign keys are declared (`products → categories`, `orders → customers`, `order_items → orders, products`). As in real Postgres, declaring a foreign key does not create an index.
 
-Exact page counts and B-tree depths are measured in M1 and recorded here.
+### Measured sizes (seed version 1)
+
+8 kB pages. The whole database, catalogs included, is about 31 MB.
+
+| Table | Rows | Heap pages | Indexes (pages, B-tree levels) |
+|---|---|---|---|
+| `categories` | 12 | 1 | `categories_pkey` (2, 1 level: the root is the only leaf) |
+| `products` | 1,000 | 48 | `products_pkey` (5, 2) |
+| `customers` | 10,000 | 126 | `customers_pkey` (30, 2), `customers_email_key` (64, 2), `customers_last_name_first_name_idx` (40, 2) |
+| `orders` | 50,000 | 589 | `orders_pkey` (139, 2), `orders_customer_id_order_date_idx` (139, 2) |
+| `order_items` | 200,582 | 1,278 | `order_items_pkey` (553, 3) |
+
+Page counts include each index's metapage.
 
 ### Distributions (deliberate, for teaching)
 
@@ -24,7 +36,9 @@ Exact page counts and B-tree depths are measured in M1 and recorded here.
 
 ### Determinism
 
-Data is generated in SQL with a fixed random seed (`setseed`), then `VACUUM ANALYZE`d. Every visitor gets identical tables and page layouts, so examples can say "look at page 37". Changing the generator bumps the seed version (see [ARCHITECTURE.md](ARCHITECTURE.md#persistence-and-seeding-worker)).
+Data is generated in SQL (`src/db/seed.ts`) with a fixed random seed (`setseed`), rows inserted in a fixed order, then `VACUUM ANALYZE`d. Indexes and constraints are added after loading, so each B-tree is built in one pass. Every visitor gets identical tables and page layouts, so examples can say "look at page 37". A unit test pins a fingerprint of every row and its `ctid`; changing the generator changes it, and must bump the seed version (see [ARCHITECTURE.md](ARCHITECTURE.md#persistence-and-seeding-worker)). Generation takes about a second.
+
+Other details: `order_date` runs evenly from 2022-01-01 to 2024-12-31; orders have 1 to 7 items; 60% of items have quantity 1; product prices are skewed toward the cheap end ($2 to $500); `orders.total` is the sum of its items. Customers' `signup_date` rises with `id`.
 
 ## Starting indexes
 
