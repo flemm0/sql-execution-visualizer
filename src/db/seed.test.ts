@@ -39,9 +39,7 @@ describe('seed data', () => {
     expect(await count(db, 'SELECT count(*) FROM products')).toBe(1000)
     expect(await count(db, 'SELECT count(*) FROM customers')).toBe(10000)
     expect(await count(db, 'SELECT count(*) FROM orders')).toBe(50000)
-    const items = await count(db, 'SELECT count(*) FROM order_items')
-    expect(items).toBeGreaterThan(190_000)
-    expect(items).toBeLessThan(210_000)
+    expect(await count(db, 'SELECT count(*) FROM order_items')).toBe(200_582)
   })
 
   it('stores orders physically in date order', async () => {

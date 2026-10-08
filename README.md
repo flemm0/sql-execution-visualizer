@@ -22,7 +22,8 @@ Requires Node.js 20.19+ (CI uses Node 24).
 npm install
 npm run dev        # local dev server
 npm run check      # lint, unit tests, typecheck, production build
-npm run test:e2e   # browser smoke test (first run: npx playwright install chromium)
+npm run test:e2e   # browser tests (first run: npx playwright install chromium)
+npm run verify     # both: everything CI runs; run before opening a PR
 ```
 
 ## License
