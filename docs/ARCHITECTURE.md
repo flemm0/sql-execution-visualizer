@@ -98,7 +98,9 @@ The database is stored in the browser's IndexedDB (PGlite data dir `idb://sql-ex
 ## Testing
 
 - **Vitest (Node):** PGlite runs in Node, so the worker pipeline (runner, inspector, replay, validator) is tested without a browser. Each example query must replay and validate cleanly.
-- **Playwright:** a smoke test loads the production build in Chromium and runs a query.
+- **Playwright:** tests load the production build in Chromium and do what a visitor does: first visit, reload, several tabs, reset, and, once the SQL editor exists, running queries. Each Playwright test gets a fresh browser profile, so each starts with an empty IndexedDB.
+- Unit tests run in Node, so `tsconfig.node.json` typechecks them; browser code is typechecked without Node's types.
+- Every PR adds tests for the behavior it adds and lists in its description what is not tested yet ([ADR 0018](decisions/0018-tests-in-every-pr.md)).
 
 ## Risks and open questions
 

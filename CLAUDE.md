@@ -17,5 +17,6 @@ The design lives in `docs/`; read the relevant file before working in its area.
 
 - **Truthful:** everything the UI shows (plans, page numbers, `ctid`s, keys, counts, cache hits and reads) comes from Postgres. The replay engine only reconstructs order, and the validator checks it. When something can't be validated, the UI says so.
 - **Docs move with the design:** a PR that changes behavior or design updates the matching doc in the same PR. A new or reversed decision gets a record in `docs/decisions/` (copy `0000-template.md`; mark the old one superseded).
-- **One branch and PR per feature.** Flemming reviews and merges; merging to `main` deploys to GitHub Pages. Run `npm run check` before opening a PR.
+- **One branch and PR per feature.** Flemming reviews and merges; merging to `main` deploys to GitHub Pages.
+- **Tested:** every PR adds tests for each behavior it adds or changes: Vitest for database and worker logic, Playwright for what a visitor sees and does. Each new test must go red when the code it covers breaks; break that code once and watch it fail. Before opening a PR, run `npm run verify` and check the change by hand in the running app. The PR description has a **Testing** section: what the tests cover, what was checked by hand, and what isn't tested yet and why. See [ADR 0018](docs/decisions/0018-tests-in-every-pr.md).
 - **Readable TypeScript:** Flemming is new to TypeScript. Write conventional, plainly typed code, and explain any non-obvious TypeScript or React pattern in the PR description.

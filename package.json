@@ -13,7 +13,8 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "check": "npm run lint && npm run test && npm run build"
+    "check": "npm run lint && npm run test && npm run build",
+    "verify": "npm run check && npm run test:e2e"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",
