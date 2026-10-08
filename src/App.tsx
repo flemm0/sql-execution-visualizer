@@ -1,11 +1,11 @@
 import type { PGliteInterface } from '@electric-sql/pglite'
 import { useEffect, useState, type ReactNode } from 'react'
-import { listTables, postgresVersion, type TableInfo } from './db/catalog'
+import { loadCatalog, postgresVersion, type DatabaseInfo } from './db/catalog'
 import { connectToDatabase } from './db/client'
 import { SEED_VERSION, readSeedInfo, resetDatabase, type SeedInfo } from './db/seed'
 import { APP_NAME, Header } from './layout/Header'
 import { Workspace } from './layout/Workspace'
-import { TableList } from './schema/TableList'
+import { SchemaBrowser } from './schema/SchemaBrowser'
 
 // Started once per page load: in development, React's StrictMode runs effects twice.
 let connection: Promise<PGliteInterface> | undefined
@@ -17,7 +17,7 @@ function getDatabase() {
 interface Overview {
   version: string
   seed: SeedInfo | null
-  tables: TableInfo[]
+  catalog: DatabaseInfo
 }
 
 async function loadOverview(): Promise<Overview> {
@@ -25,7 +25,7 @@ async function loadOverview(): Promise<Overview> {
   return {
     version: await postgresVersion(db),
     seed: await readSeedInfo(db),
-    tables: await listTables(db),
+    catalog: await loadCatalog(db),
   }
 }
 
@@ -90,7 +90,7 @@ export default function App() {
         <Workspace
           schemaBrowser={
             overview ? (
-              <TableList tables={overview.tables} />
+              <SchemaBrowser database={overview.catalog} />
             ) : (
               <Placeholder>
                 {state.status === 'resetting'
@@ -118,7 +118,7 @@ export default function App() {
       <footer className="flex gap-4 border-t border-line bg-surface-1 px-4 py-1 font-mono text-xs text-fg-muted">
         {overview && (
           <>
-            <span data-testid="pg-version">{overview.version.split(' on ')[0]}</span>
+            <span data-testid="pg-version">{overview.version}</span>
             {overview.seed && (
               <span data-testid="seeded-at">
                 Sample data generated {overview.seed.seededAt.toLocaleString()}, saved in this browser

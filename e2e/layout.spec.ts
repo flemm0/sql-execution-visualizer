@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { treeItem } from './schemaTree'
 
 const PANES = ['Schema', 'SQL editor', 'Execution plan', 'Visualization', 'Results']
 
@@ -20,20 +21,20 @@ test('the app is called Pagewalk and shows the five panes', async ({ page }) => 
     await expect(page.getByRole('region', { name: pane })).toBeVisible()
   }
   const schema = page.getByRole('region', { name: 'Schema' })
-  await expect(schema.getByTestId('table-orders')).toContainText('orders_pkey', { timeout: 60_000 })
+  await expect(treeItem(schema, 'orders')).toBeVisible({ timeout: 60_000 })
 })
 
 test('a pane collapses to a strip and expands again from its title bar', async ({ page }) => {
   await page.goto('./')
-  await expect(page.getByTestId('table-orders')).toBeVisible({ timeout: 60_000 })
+  await expect(treeItem(page, 'orders')).toBeVisible({ timeout: 60_000 })
   const openWidth = await widthOf(page, 'schema-pane')
 
   await page.getByRole('button', { name: 'Collapse Schema' }).click()
-  await expect(page.getByTestId('table-orders')).toBeHidden()
+  await expect(treeItem(page, 'orders')).toBeHidden()
   expect(await widthOf(page, 'schema-pane')).toBeLessThanOrEqual(40)
 
   await page.getByRole('button', { name: 'Expand Schema' }).click()
-  await expect(page.getByTestId('table-orders')).toBeVisible()
+  await expect(treeItem(page, 'orders')).toBeVisible()
   expect(await widthOf(page, 'schema-pane')).toBeCloseTo(openWidth, 0)
 })
 
@@ -104,7 +105,7 @@ test('the app still works when the browser blocks localStorage', async ({ page }
     `,
   })
   await page.goto('./')
-  await expect(page.getByTestId('table-orders')).toBeVisible({ timeout: 60_000 })
+  await expect(treeItem(page, 'orders')).toBeVisible({ timeout: 60_000 })
   await page.getByRole('button', { name: 'Collapse Results' }).click()
   await page.getByRole('button', { name: /Switch to (light|dark) theme/ }).click()
   await expect(page.getByRole('button', { name: 'Expand Results' })).toBeVisible()

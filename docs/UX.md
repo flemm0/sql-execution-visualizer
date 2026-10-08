@@ -28,20 +28,20 @@ Five resizable, collapsible panes:
 ```
 ┌─────────────┬────────────────────────────┬──────────────────────────┐
 │ Schema      │ SQL editor                 │ Execution plan (tree)    │
-│ browser     │ [Run] [Examples ▾] [Reset] │ ▸ Limit                  │
-│ ▾ public    │                            │   ▸ Index Scan  ◀ active │
-│  ▾ orders   ├────────────────────────────┴──────────────────────────┤
-│    columns  │ Visualization                                         │
-│    indexes  │  B-tree index      Shared buffers      Heap (table)   │
-│    stats    │  [root]→[leaf]…    [■][■][□][□]…       [p0][p1][p2]…  │
-│  ▸ customers│  ⏮ ◀ ▶ ⏭  ───●──────  speed ▾   step 120 / 3,410     │
-│             ├───────────────────────────────────────────────────────┤
+│ ▾ postgres  │ [Run] [Examples ▾] [Reset] │ ▸ Limit                  │
+│  ▾ public   │                            │   ▸ Index Scan  ◀ active │
+│   ▾ Tables  ├────────────────────────────┴──────────────────────────┤
+│    ▸ orders │ Visualization                                         │
+│    ▸ produc…│  B-tree index      Shared buffers      Heap (table)   │
+│             │  [root]→[leaf]…    [■][■][□][□]…       [p0][p1][p2]…  │
+│ ─ details ─ │  ⏮ ◀ ▶ ⏭  ───●──────  speed ▾   step 120 / 3,410     │
+│ Table orders├───────────────────────────────────────────────────────┤
 │             │ Results  [Final: 12 rows] [Hash: 30] [Sort: 312]      │
 └─────────────┴───────────────────────────────────────────────────────┘
 ```
 
 - **Resizing and collapsing:** drag (or focus and use the arrow keys on) the line between two panes. Each pane's title bar has a collapse button; a collapsed side pane leaves a narrow strip with its title, and a collapsed top or bottom pane leaves its title bar. Pane sizes and collapsed panes are remembered in that browser.
-- **Schema browser:** tables (rows, pages, size), columns and types, indexes (definition, levels, pages), and statistics freshness. Clicking a table or index opens its pages in the visualization pane.
+- **Schema browser:** an object tree like pgAdmin's or Snowflake's: database → schemas → **Tables** → each table → **Columns** (with types; a key icon marks primary-key columns) and **Indexes**. Folders show their item count. It opens with the database, schemas and Tables folders expanded and the tables closed. Postgres's system schemas and the app's own `visualizer` schema are hidden; schemas a learner creates appear, even when empty. Clicking a row selects it and opens or closes it; the keyboard follows the WAI-ARIA tree pattern (arrows, Home/End, Enter). A **details panel** under the tree shows the selected object's facts from the catalog: a table's row estimate, heap pages and size; a column's type, nullability and primary key; an index's kind, B-tree levels, pages and definition. Still to come: statistics freshness (with the autovacuum simulator) and clicking a table or index to open its pages in the visualization pane (M2).
 - **Plan tree:** the real plan. During playback the active node is highlighted, and each node shows estimated rows vs. actual rows so far.
 - **Results:** a **Final** tab plus one tab per intermediate result (v2+). Rows appear as the animation emits them.
 
