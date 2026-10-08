@@ -1,4 +1,6 @@
-# SQL Execution Visualizer
+# Pagewalk
+
+*(repository: `sql-execution-visualizer`)*
 
 Watch PostgreSQL execute your query one step at a time: which index pages it walks, which table pages it reads from disk into memory, which rows pass each condition, and how the result set builds up.
 

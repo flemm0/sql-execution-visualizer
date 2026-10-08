@@ -1,10 +1,18 @@
-/* Design tokens. Dark-first; the light theme overrides them. See docs/UX.md. */
+@import 'tailwindcss';
+
+/*
+ * Design tokens. Every color in the app comes from one of these variables, so
+ * the two themes only have to redefine them here. Dark is the default; the
+ * light theme applies when <html data-theme="light"> (see src/theme.ts).
+ * Accent colors have one meaning each: see docs/UX.md#color-meanings.
+ */
 :root {
   color-scheme: dark;
   --surface-page: #0a0a0b;
   --surface-1: #111112;
-  --surface-2: #161617;
+  --surface-2: #19191b;
   --border: hsl(0 0% 100% / 0.08);
+  --border-strong: hsl(0 0% 100% / 0.16);
   --text-primary: #e2e4e7;
   --text-secondary: hsl(0 0% 100% / 0.55);
   --accent-index: #38bdf8;
@@ -12,148 +20,80 @@
   --accent-result: #34d399;
   --accent-intermediate: #a78bfa;
   --accent-rejected: #f87171;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --surface-page: #ffffff;
+  --surface-1: #f8fafc;
+  --surface-2: #eef2f6;
+  --border: rgb(15 23 42 / 0.12);
+  --border-strong: rgb(15 23 42 / 0.24);
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --accent-index: #0284c7;
+  --accent-heap: #b45309;
+  --accent-result: #047857;
+  --accent-intermediate: #7c3aed;
+  --accent-rejected: #dc2626;
+}
+
+/*
+ * Tailwind class names for the tokens: `bg-surface-1`, `text-fg-muted`,
+ * `border-line`, `text-index`, `font-heading` and so on. `inline` makes the
+ * classes point at the variables, so they follow the theme.
+ */
+@theme inline {
+  --color-page: var(--surface-page);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-fg: var(--text-primary);
+  --color-fg-muted: var(--text-secondary);
+  --color-index: var(--accent-index);
+  --color-heap: var(--accent-heap);
+  --color-result: var(--accent-result);
+  --color-intermediate: var(--accent-intermediate);
+  --color-rejected: var(--accent-rejected);
+}
+
+@theme {
   --font-heading: 'Instrument Sans', system-ui, sans-serif;
-  --font-ui: 'Inter', system-ui, sans-serif;
+  --font-sans: 'Inter', system-ui, sans-serif;
   --font-mono: 'Geist Mono', ui-monospace, monospace;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color-scheme: light;
-    --surface-page: #ffffff;
-    --surface-1: #f8fafc;
-    --surface-2: #f1f5f9;
-    --border: rgb(15 23 42 / 0.12);
-    --text-primary: #0f172a;
-    --text-secondary: #475569;
-    --accent-index: #0284c7;
-    --accent-heap: #b45309;
-    --accent-result: #047857;
-    --accent-intermediate: #7c3aed;
-    --accent-rejected: #dc2626;
+@layer base {
+  body {
+    @apply bg-page font-sans text-sm text-fg;
+  }
+
+  h1,
+  h2,
+  h3 {
+    @apply font-heading font-semibold;
+  }
+
+  code {
+    @apply font-mono;
+  }
+
+  a {
+    @apply text-index;
+  }
+
+  button:not(:disabled) {
+    @apply cursor-pointer;
   }
 }
 
-* {
-  box-sizing: border-box;
-}
+@layer components {
+  .btn {
+    @apply rounded-md border border-line bg-surface-2 px-3 py-1 text-fg hover:border-line-strong disabled:opacity-50;
+  }
 
-body {
-  margin: 0;
-  background: var(--surface-page);
-  color: var(--text-primary);
-  font: 15px/1.6 var(--font-ui);
-}
-
-h1,
-h2 {
-  font-family: var(--font-heading);
-  font-weight: 600;
-  margin: 0 0 0.5rem;
-}
-
-h1 {
-  font-size: 1.75rem;
-}
-
-h2 {
-  font-size: 1rem;
-}
-
-code,
-.mono,
-table {
-  font-family: var(--font-mono);
-  font-size: 0.875rem;
-}
-
-a {
-  color: var(--accent-index);
-}
-
-.page {
-  max-width: 760px;
-  margin: 0 auto;
-  padding: 3rem 1rem;
-  display: grid;
-  gap: 1rem;
-}
-
-.subtitle,
-.muted {
-  color: var(--text-secondary);
-  margin: 0;
-}
-
-.error {
-  color: var(--accent-rejected);
-}
-
-.card {
-  background: var(--surface-1);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--border);
-  border-radius: 8px;
-  padding: 1rem 1.25rem;
-}
-
-.card p {
-  margin: 0;
-}
-
-.card p + p,
-.card ul {
-  margin: 0.5rem 0 0;
-}
-
-.card ul {
-  padding-left: 1.25rem;
-}
-
-.index-name {
-  color: var(--accent-index);
-}
-
-button {
-  font: inherit;
-  color: var(--text-primary);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.25rem 0.75rem;
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: var(--text-secondary);
-}
-
-.accent-index {
-  border-left-color: var(--accent-index);
-}
-
-.accent-heap {
-  border-left-color: var(--accent-heap);
-}
-
-.accent-result {
-  border-left-color: var(--accent-result);
-}
-
-table {
-  border-collapse: collapse;
-  width: 100%;
-}
-
-th,
-td {
-  text-align: left;
-  padding: 0.25rem 0.75rem 0.25rem 0;
-  border-bottom: 1px solid var(--border);
-}
-
-th {
-  font-family: var(--font-ui);
-  font-weight: 500;
-  color: var(--text-secondary);
+  .icon-btn {
+    @apply grid size-7 place-items-center rounded-md text-fg-muted hover:bg-surface-2 hover:text-fg;
+  }
 }
