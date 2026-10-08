@@ -90,6 +90,7 @@ The database is stored in the browser's IndexedDB (PGlite data dir `idb://sql-ex
 - **First load:** the worker's `init` generates the seed data in SQL from a fixed random seed, then `VACUUM ANALYZE`s it (about a second, so no prebuilt data directory is needed). The seed runs in one transaction, so an interrupted seed leaves nothing behind.
 - **Seed version:** stored in `visualizer.seed_info`, a schema of its own outside `public`. When a release bumps `SEED_VERSION`, the UI offers a reset instead of resetting on its own.
 - **Reset database:** drops every non-system schema (including `public`, which takes `pageinspect` and `pg_buffercache` with it), recreates `public` and the extensions, and seeds again. Pages and `ctid`s come out identical to a first load; transaction IDs (`xmin`) are higher.
+- **UI settings** (theme, pane sizes) are not in the database: they live in `localStorage`, read and written through `src/storage.ts`, which ignores storage errors so a browser that blocks site data still works, just without remembering them. Reset database leaves them alone.
 
 ## Hosting and delivery
 

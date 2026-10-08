@@ -11,7 +11,21 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&family=Instrument+Sans:wght@500;600&family=Inter:wght@400;500&display=swap"
     />
-    <title>SQL Execution Visualizer</title>
+    <title>Pagewalk</title>
+    <script>
+      // Sets the theme before the first paint so the page doesn't flash the wrong colors:
+      // the visitor's saved choice, otherwise the operating system's setting. See src/theme.ts.
+      ;(function () {
+        var theme = null
+        try {
+          theme = localStorage.getItem('pagewalk-theme')
+        } catch (error) {}
+        if (theme !== 'light' && theme !== 'dark') {
+          theme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+        }
+        document.documentElement.dataset.theme = theme
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

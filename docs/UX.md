@@ -5,9 +5,9 @@
 Inspired by [datadriven.io](https://datadriven.io)'s practice-problem pages, with our own identity: our own name, logo, and layouts. We borrow the general feel, not a copy.
 
 - **Fonts:** Instrument Sans (headings), Inter (UI text), Geist Mono (code, keys, page numbers). All are open-source.
-- **Theme:** dark-first, near-black surfaces with hairline borders, plus a light theme toggle. All colors are CSS variables (design tokens) defined once.
-- **Desktop-first:** minimum ~1280 px wide; small screens show a "best on desktop" notice.
-- **Display name:** to be proposed in M1; the repo name and URL stay `sql-execution-visualizer`.
+- **Theme:** dark-first, near-black surfaces with hairline borders, plus a light theme. A visitor's first visit follows their operating system's light/dark setting; the sun/moon button in the header switches themes, and the choice is remembered in that browser. All colors are CSS variables (design tokens) defined once in `src/index.css` and exposed to Tailwind as classes (`bg-surface-1`, `text-index`, …).
+- **Desktop-first:** designed for ~1280 px and wider; windows narrower than 1024 px show a "built for desktop" notice.
+- **Display name:** **Pagewalk** ([ADR 0019](decisions/0019-display-name-pagewalk.md)). The logo is three linked pages walked in order: index (sky), heap (amber), result (emerald). The repo name and URL stay `sql-execution-visualizer`.
 
 ### Color meanings
 
@@ -40,6 +40,7 @@ Five resizable, collapsible panes:
 └─────────────┴───────────────────────────────────────────────────────┘
 ```
 
+- **Resizing and collapsing:** drag (or focus and use the arrow keys on) the line between two panes. Each pane's title bar has a collapse button; a collapsed side pane leaves a narrow strip with its title, and a collapsed top or bottom pane leaves its title bar. Pane sizes and collapsed panes are remembered in that browser.
 - **Schema browser:** tables (rows, pages, size), columns and types, indexes (definition, levels, pages), and statistics freshness. Clicking a table or index opens its pages in the visualization pane.
 - **Plan tree:** the real plan. During playback the active node is highlighted, and each node shows estimated rows vs. actual rows so far.
 - **Results:** a **Final** tab plus one tab per intermediate result (v2+). Rows appear as the animation emits them.
