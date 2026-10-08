@@ -1,18 +1,19 @@
 # Architecture
 
-A static single-page app. All database work happens in the visitor's browser, inside a Web Worker running [PGlite](https://pglite.dev) (PostgreSQL 18 compiled to WebAssembly). The main thread only renders.
+A static single-page app. All database work happens in the visitor's browser, inside a Web Worker running [PGlite](https://pglite.dev) (PostgreSQL 18 compiled to WebAssembly). The main thread renders, and prepares and decodes what it sends to Postgres.
 
 ```
 ┌──────────────────────── Main thread (React) ────────────────────────┐
 │ Schema browser · SQL editor · Plan tree · Visualization · Results   │
 │                         ▲                                           │
 │                 Player (trace, position, speed, condensing)         │
+│ Statement runner (split, classify, decode Postgres's replies)       │
 └─────────────────────────┬───────────────────────────────────────────┘
                           │ messages (statements, traces, page data)
 ┌─────────────────────────▼──────── Web Worker ───────────────────────┐
-│ Statement runner ─► PGlite (Postgres 18.3)                          │
-│                       + pageinspect, pg_buffercache                 │
-│                       + IndexedDB persistence                       │
+│ PGlite (Postgres 18.3)                                              │
+│   + pageinspect, pg_buffercache                                     │
+│   + IndexedDB persistence                                           │
 │ Inspector  (reads real heap / B-tree pages and cache state)         │
 │ Replay engine (re-walks the real plan over real pages → trace)      │
 │ Validator  (replay vs. real result and EXPLAIN ANALYZE counts)      │
@@ -38,8 +39,13 @@ Other statements (DDL, DML, `ANALYZE`, `VACUUM`) just run; the schema browser an
 
 ## Components
 
-### Statement runner (worker)
-Splits editor text into statements, runs the one under the cursor or all of them, classifies each (SELECT vs. other), and routes SELECTs through the pipeline above. Results are capped at 1,000 displayed rows (the total count is always reported).
+### Statement runner (main thread)
+`src/db/statements.ts` and `src/db/runner.ts`; the decisions are in [ADR 0020](decisions/0020-statement-runner.md).
+
+- **Splitting:** the editor text is split at semicolons the way psql does it (not inside strings, quoted identifiers, dollar quotes or comments). `Cmd/Ctrl+Enter` runs the statement under the cursor, or the one before it when the cursor sits between statements. **Run all** runs them in order and stops at the first error; the rest are reported as not run.
+- **Classifying:** a statement that only reads (SELECT, WITH, VALUES or TABLE with no INSERT, UPDATE, DELETE, MERGE or INTO in it) goes through the pipeline above. Anything else runs once, as typed, without a plan, so writes never happen twice.
+- **Sending:** each statement goes to Postgres with the simple query protocol, as psql sends it, and the reply is decoded on the main thread. PGlite's worker proxy would otherwise drop an error's position, DETAIL and HINT. Values are kept as Postgres's text (no conversion to JavaScript dates or objects), and notices are kept.
+- **Results** are capped at 1,000 displayed rows (the total count is always reported). After each run the catalog (schema browser and editor completion) and the seed version are reloaded.
 
 ### Inspector (worker)
 Typed wrappers around `pageinspect` and `pg_buffercache`. Decodes index keys from raw bytes for simple fixed-width types (int, bigint, date, timestamp). For other types it reads the key from the heap row the index entry points to, evaluating the index's column expressions in SQL.
@@ -99,7 +105,7 @@ The database is stored in the browser's IndexedDB (PGlite data dir `idb://sql-ex
 ## Testing
 
 - **Vitest (Node):** PGlite runs in Node, so the worker pipeline (runner, inspector, replay, validator) is tested without a browser. Each example query must replay and validate cleanly.
-- **Playwright:** tests load the production build in Chromium and do what a visitor does: first visit, reload, several tabs, reset, and, once the SQL editor exists, running queries. Each Playwright test gets a fresh browser profile, so each starts with an empty IndexedDB.
+- **Playwright:** tests load the production build in Chromium and do what a visitor does: first visit, reload, several tabs, reset, and running statements in the SQL editor (results, plans, errors, and changes surviving a reload). Each Playwright test gets a fresh browser profile, so each starts with an empty IndexedDB.
 - Unit tests run in Node, so `tsconfig.node.json` typechecks them; browser code is typechecked without Node's types.
 - Every PR adds tests for the behavior it adds and lists in its description what is not tested yet ([ADR 0018](decisions/0018-tests-in-every-pr.md)).
 

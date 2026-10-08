@@ -41,7 +41,7 @@ Five resizable, collapsible panes:
 ```
 
 - **Resizing and collapsing:** drag (or focus and use the arrow keys on) the line between two panes. Each pane's title bar has a collapse button; a collapsed side pane leaves a narrow strip with its title, and a collapsed top or bottom pane leaves its title bar. Pane sizes and collapsed panes are remembered in that browser.
-- **Schema browser:** an object tree like pgAdmin's or Snowflake's: database → schemas → **Tables** → each table → **Columns** (with types; a key icon marks primary-key columns) and **Indexes**. Folders show their item count. It opens with the database, schemas and Tables folders expanded and the tables closed. Postgres's system schemas and the app's own `visualizer` schema are hidden; schemas a learner creates appear, even when empty. Clicking a row selects it and opens or closes it; the keyboard follows the WAI-ARIA tree pattern (arrows, Home/End, Enter). A **details panel** under the tree shows the selected object's facts from the catalog: a table's row estimate, heap pages and size; a column's type, nullability and primary key; an index's kind, B-tree levels, pages and definition. Still to come: statistics freshness (with the autovacuum simulator) and clicking a table or index to open its pages in the visualization pane (M2).
+- **Schema browser:** an object tree like pgAdmin's or Snowflake's: database → schemas → **Tables** → each table → **Columns** (with types; a key icon marks primary-key columns) and **Indexes**. Folders show their item count. It opens with the database, schemas and Tables folders expanded and the tables closed. Postgres's system schemas and the app's own `visualizer` schema are hidden; schemas a learner creates appear, even when empty. Clicking a row selects it and opens or closes it; the keyboard follows the WAI-ARIA tree pattern (arrows, Home/End, Enter). A **details panel** under the tree shows the selected object's facts from the catalog: a table's row estimate, heap pages and size; a column's type, nullability and primary key; an index's kind, B-tree levels, pages and definition. After every statement it reloads from the catalog, so new tables and indexes appear at once. Still to come: statistics freshness (with the autovacuum simulator) and clicking a table or index to open its pages in the visualization pane (M2).
 - **Plan tree:** the real plan. During playback the active node is highlighted, and each node shows estimated rows vs. actual rows so far.
 - **Results:** a **Final** tab plus one tab per intermediate result (v2+). Rows appear as the animation emits them.
 
@@ -86,10 +86,13 @@ Three zones show the path a page takes: **disk → shared buffers → executor**
 
 ## Running statements
 
-- `Cmd/Ctrl+Enter` runs the statement under the cursor; **Run all** runs the whole editor in order.
-- **SELECT:** the plan appears immediately and the animation autoplays (a setting can switch autoplay off; then it loads paused at step 0). Results fill in as rows are emitted; **Skip to end** reveals the final result instantly.
-- **Other statements:** a status line ("CREATE INDEX: done, 18 ms"); the schema browser refreshes; no animation in v1.
-- **SQL errors:** the Postgres error message is shown in the results pane.
+- **Editor:** CodeMirror with Postgres syntax. It completes keywords, schemas, tables and columns from the live catalog, so a table created a moment ago completes too. Syntax colors stay neutral, because the accent colors are reserved for their meanings. The editor's text is remembered in that browser.
+- `Cmd/Ctrl+Enter` (or **Run**) runs the statement under the cursor; `Shift+Cmd/Ctrl+Enter` (or **Run all**) runs the whole editor in order and stops at the first error.
+- **Results pane:** one status line per statement ("SELECT: 3 rows, 2 ms", "CREATE INDEX: done, 18 ms", "UPDATE: 4 rows"), Postgres's notices under it, then the rows of the last statement that returned any. Values appear exactly as Postgres prints them (dates as `2024-02-29`, booleans as `t`/`f`), and NULL as a dimmed *NULL*.
+- **Plan pane:** the plan of the last query in the run: each node's heading as in text EXPLAIN, actual vs. estimated rows, shared-buffer hits and reads, and its conditions (Index Cond, Filter, Rows Removed by Filter, …), plus planning and execution time. A run with no query leaves a note saying so.
+- **SELECT:** the plan appears immediately and the animation autoplays (a setting can switch autoplay off; then it loads paused at step 0). Results fill in as rows are emitted; **Skip to end** reveals the final result instantly. (Until the animation exists, the plan and the full result appear together.)
+- **Other statements:** a status line; the schema browser refreshes; no plan and no animation in v1.
+- **SQL errors:** Postgres's message in the results pane, with its DETAIL and HINT, and the line and column it points at; clicking those puts the cursor there.
 - **Autovacuum notices** appear as small toasts ("autovacuum: analyzed orders").
 
 ## Defaults
