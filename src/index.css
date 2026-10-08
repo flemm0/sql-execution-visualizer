@@ -101,6 +101,33 @@ a {
   margin: 0;
 }
 
+.card p + p,
+.card ul {
+  margin: 0.5rem 0 0;
+}
+
+.card ul {
+  padding-left: 1.25rem;
+}
+
+.index-name {
+  color: var(--accent-index);
+}
+
+button {
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.25rem 0.75rem;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--text-secondary);
+}
+
 .accent-index {
   border-left-color: var(--accent-index);
 }
