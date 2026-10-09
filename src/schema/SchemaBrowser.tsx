@@ -13,7 +13,13 @@ import { buildTree, findNode, findParent, initiallyExpanded, visibleNodes, type 
  * a node, Left closes it or steps out to the parent, Home/End jump, Enter or
  * Space selects (and opens or closes).
  */
-export function SchemaBrowser({ database }: { database: DatabaseInfo }) {
+interface SchemaBrowserProps {
+  database: DatabaseInfo
+  /** Whether the autovacuum simulator is turned on, for the table details. */
+  autovacuumOn: boolean
+}
+
+export function SchemaBrowser({ database, autovacuumOn }: SchemaBrowserProps) {
   const root = useMemo(() => buildTree(database), [database])
   // Node ids are paths of names, so they stay valid when the catalog is reloaded.
   const [expanded, setExpanded] = useState<Set<string>>(() => initiallyExpanded(root))
@@ -105,7 +111,7 @@ export function SchemaBrowser({ database }: { database: DatabaseInfo }) {
       <ul role="tree" aria-label="Database objects" className="min-h-0 flex-1 overflow-auto py-1" onKeyDown={onKeyDown}>
         <TreeItem node={root} level={1} tree={tree} />
       </ul>
-      <DetailsPanel object={selected?.object ?? null} />
+      <DetailsPanel object={selected?.object ?? null} autovacuumOn={autovacuumOn} />
     </div>
   )
 }

@@ -1,4 +1,5 @@
 import type { PGliteInterface } from '@electric-sql/pglite'
+import { flushStatistics } from './autovacuum'
 import {
   CATEGORIES,
   COUNTRIES,
@@ -58,6 +59,10 @@ export async function ensureSeeded(db: PGliteInterface) {
 export async function seedDatabase(db: PGliteInterface) {
   // One transaction: a seed interrupted by closing the tab leaves nothing behind.
   await db.exec(`BEGIN; ${SEED_SQL} COMMIT;`)
+  // Publish the seed's insert counts first. Otherwise they reach
+  // pg_stat_user_tables after VACUUM ANALYZE has reset them, and every table
+  // looks twice its size with all its rows changed since the last analyze.
+  await flushStatistics(db)
   // VACUUM can't run inside a transaction. It sets hint bits and the visibility map,
   // and ANALYZE gives the planner statistics, as autovacuum would on a real server.
   await db.exec(`VACUUM ANALYZE ${SEED_TABLES.join(', ')}`)
