@@ -1,5 +1,6 @@
-import { messages, parse, protocol, type ParserOptions, type PGliteInterface, type Results } from '@electric-sql/pglite'
+import { messages, parse, type ParserOptions, type PGliteInterface, type Results } from '@electric-sql/pglite'
 import { parsePlan, type Plan } from './plan'
+import { query, sendQuery } from './query'
 import { commandName, isQuery, splitStatements, statementAt, type Statement } from './statements'
 
 /** The results pane shows at most this many rows of a result; the total is always reported. */
@@ -96,7 +97,8 @@ export async function runStatement(db: PGliteInterface, statement: Statement): P
   let plan: Plan | null = null
   if (isQuery(statement)) {
     try {
-      const explain = await db.query<{ 'QUERY PLAN': unknown }>(
+      const explain = await query<{ 'QUERY PLAN': unknown }>(
+        db,
         `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) ${statement.text}`,
       )
       plan = parsePlan(explain.rows[0]['QUERY PLAN'])
@@ -143,12 +145,11 @@ export async function runStatement(db: PGliteInterface, statement: Statement): P
  * the end of every reply; an empty query asks for it without doing anything.
  */
 export async function inTransaction(db: PGliteInterface): Promise<boolean> {
-  const reply = await db.execProtocolRaw(protocol.serialize.query(''))
   let status = 'I'
-  new protocol.Parser().parse(reply, (message) => {
+  for (const message of await sendQuery(db, '')) {
     // 'I' idle, 'T' in a transaction block, 'E' in a failed one.
     if (message instanceof messages.ReadyForQueryMessage) status = message.status
-  })
+  }
   return status !== 'I'
 }
 
@@ -157,20 +158,11 @@ type SimpleQueryReply =
   | { status: 'error'; error: messages.DatabaseError; notices: string[] }
 
 /**
- * Sends one statement with Postgres's simple query protocol, as psql does
- * (so statements like VACUUM, which can't run in a transaction, work too),
- * and reads the reply here rather than in the worker.
- *
- * PGlite's db.exec would do the sending, but in the browser it runs the
- * statement in the Web Worker, and on an error the worker passes back only
- * the message: the position, DETAIL and HINT are lost. Asking for the raw
- * reply bytes and decoding them here keeps every field.
+ * Sends one statement and reads the reply's rows, notices and error. Every
+ * field of an error is kept: its position, DETAIL and HINT (see sendQuery).
  */
 async function simpleQuery(db: PGliteInterface, sql: string): Promise<SimpleQueryReply> {
-  const reply = await db.execProtocolRaw(protocol.serialize.query(sql))
-  const received: messages.BackendMessage[] = []
-  new protocol.Parser().parse(reply, (message) => received.push(message))
-
+  const received = await sendQuery(db, sql)
   const notices: string[] = []
   let error: messages.DatabaseError | null = null
   for (const message of received) {

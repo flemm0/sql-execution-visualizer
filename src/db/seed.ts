@@ -1,5 +1,6 @@
 import type { PGliteInterface } from '@electric-sql/pglite'
 import { flushStatistics } from './autovacuum'
+import { query } from './query'
 import {
   CATEGORIES,
   COUNTRIES,
@@ -22,7 +23,7 @@ export const SEED_TABLES = ['categories', 'products', 'customers', 'orders', 'or
 
 /** Creates pageinspect and pg_buffercache. Safe to run more than once. */
 export async function installExtensions(db: PGliteInterface) {
-  await db.exec(`
+  await query(db, `
     CREATE EXTENSION IF NOT EXISTS pageinspect;
     CREATE EXTENSION IF NOT EXISTS pg_buffercache;
   `)
@@ -39,11 +40,13 @@ export interface SeedInfo {
  * Stored in its own schema so it stays out of the learner's way.
  */
 export async function readSeedInfo(db: PGliteInterface): Promise<SeedInfo | null> {
-  const exists = await db.query<{ found: boolean }>(
+  const exists = await query<{ found: boolean }>(
+    db,
     `SELECT to_regclass('visualizer.seed_info') IS NOT NULL AS found`,
   )
   if (!exists.rows[0].found) return null
-  const result = await db.query<{ version: number; seeded_at: Date }>(
+  const result = await query<{ version: number; seeded_at: Date }>(
+    db,
     'SELECT version, seeded_at FROM visualizer.seed_info',
   )
   const row = result.rows[0]
@@ -58,14 +61,14 @@ export async function ensureSeeded(db: PGliteInterface) {
 /** Generates the online-store tables, then VACUUM ANALYZEs them. Expects an empty database. */
 export async function seedDatabase(db: PGliteInterface) {
   // One transaction: a seed interrupted by closing the tab leaves nothing behind.
-  await db.exec(`BEGIN; ${SEED_SQL} COMMIT;`)
+  await query(db, `BEGIN; ${SEED_SQL} COMMIT;`)
   // Publish the seed's insert counts first. Otherwise they reach
   // pg_stat_user_tables after VACUUM ANALYZE has reset them, and every table
   // looks twice its size with all its rows changed since the last analyze.
   await flushStatistics(db)
   // VACUUM can't run inside a transaction. It sets hint bits and the visibility map,
   // and ANALYZE gives the planner statistics, as autovacuum would on a real server.
-  await db.exec(`VACUUM ANALYZE ${SEED_TABLES.join(', ')}`)
+  await query(db, `VACUUM ANALYZE ${SEED_TABLES.join(', ')}`)
 }
 
 /**
@@ -73,7 +76,7 @@ export async function seedDatabase(db: PGliteInterface) {
  * then seeds again from scratch.
  */
 export async function resetDatabase(db: PGliteInterface) {
-  await db.exec(`
+  await query(db, `
     DO $$
     DECLARE
       schema_name text;

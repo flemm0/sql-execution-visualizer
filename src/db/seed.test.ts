@@ -129,15 +129,10 @@ describe('seed data', () => {
     // The check above only fails when the seed finishes within a second of Postgres's
     // last statistics flush, so this one checks the order of the calls directly.
     const fresh = await createDatabase()
-    const query = vi.spyOn(fresh, 'query')
-    const exec = vi.spyOn(fresh, 'exec')
+    const sent = vi.spyOn(fresh, 'execProtocolRaw')
     await seedDatabase(fresh)
-    const calls = [
-      ...query.mock.calls.map(([sql], index) => ({ sql, order: query.mock.invocationCallOrder[index] })),
-      ...exec.mock.calls.map(([sql], index) => ({ sql, order: exec.mock.invocationCallOrder[index] })),
-    ]
-      .sort((a, b) => a.order - b.order)
-      .map((call) => call.sql)
+    // Each call carries a simple query message: 'Q', its length (4 bytes), the SQL, a zero byte.
+    const calls = sent.mock.calls.map(([message]) => new TextDecoder().decode(message.subarray(5, -1)))
     const seeded = calls.findIndex((sql) => sql.includes('COMMIT'))
     const flushed = calls.findIndex((sql) => sql.includes('pg_stat_force_next_flush()'))
     const vacuumed = calls.findIndex((sql) => sql.startsWith('VACUUM ANALYZE'))

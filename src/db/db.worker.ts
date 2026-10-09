@@ -1,5 +1,6 @@
 import { worker } from '@electric-sql/pglite/worker'
 import { createDatabase } from './createDatabase'
+import { saveWhenAsked } from './saveWhenAsked'
 import { ensureSeeded } from './seed'
 
 /** Where the database lives in the browser's IndexedDB, so changes survive reloads. */
@@ -12,7 +13,9 @@ worker({
   async init(options) {
     const db = await createDatabase({ ...options, dataDir: DATA_DIR })
     // The first visit generates the seed data (about a second); later visits load it.
+    // These queries run here, on db itself, so each one is saved before the next.
     await ensureSeeded(db)
-    return db
+    // The pages' queries don't save; the app saves once at the end of each run (ADR 0023).
+    return saveWhenAsked(db)
   },
 })
