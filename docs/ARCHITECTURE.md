@@ -9,15 +9,15 @@ A static single-page app. All database work happens in the visitor's browser, in
 │                 Player (trace, position, speed, condensing)         │
 │ Statement runner (split, classify, decode Postgres's replies)       │
 │ Autovacuum simulator (after each run)                               │
+│ Inspector  (reads real heap / B-tree pages and cache state)         │
+│ Replay engine (re-walks the real plan over real pages → trace)      │
+│ Validator  (replay vs. real result and EXPLAIN ANALYZE counts)      │
 └─────────────────────────┬───────────────────────────────────────────┘
-                          │ messages (statements, traces, page data)
+                          │ queries and replies (PGlite's worker proxy)
 ┌─────────────────────────▼──────── Web Worker ───────────────────────┐
 │ PGlite (Postgres 18.3)                                              │
 │   + pageinspect, pg_buffercache                                     │
 │   + IndexedDB persistence                                           │
-│ Inspector  (reads real heap / B-tree pages and cache state)         │
-│ Replay engine (re-walks the real plan over real pages → trace)      │
-│ Validator  (replay vs. real result and EXPLAIN ANALYZE counts)      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -27,13 +27,17 @@ Postgres exposes *what* happened (the plan, the result, and per-node totals in `
 
 ## Running a SELECT
 
-1. **Prepare the cache.** If "start with an empty cache" is on, evict the buffers of every relation in the query (`pg_buffercache_evict_relation`). Snapshot which pages are cached (`pg_buffercache`).
-2. **Plan and execute.** Run `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)`. This gives the real plan tree, estimated vs. actual rows per node, and real buffer hits and reads.
-3. **Get the result.** Run the query itself for the result rows.
-4. **Inspect.** Read the pages the plan touches: B-tree metapage, root-to-leaf paths and leaf pages (`bt_metap`, `bt_page_items`; posting lists from B-tree deduplication included), and heap pages (`heap_page_items`). Pages are fetched lazily and memoized for the run.
-5. **Replay.** Walk the plan tree and emit a trace (below).
-6. **Validate.** Compare the replay with steps 2 and 3 (see Validator).
-7. **Restore the cache.** Inspection reads pages through shared buffers too. Evict pages loaded only by inspection, so the next run sees exactly the cache this query left behind.
+The order matters for getting buffer hits and reads exactly right; the measurements behind it are in [ADR 0022](decisions/0022-replay-pipeline-placement-and-buffer-counts.md).
+
+1. **Empty the cache.** If "start with an empty cache" is on, evict the buffers of every relation in the query (`pg_buffercache_evict_relation`).
+2. **Plan.** Run a plain `EXPLAIN`. The planner reads pages of its own (an index's metapage, and index probes for ranges near a column's minimum or maximum); doing it now keeps those reads out of the replay.
+3. **Snapshot the cache.** Record which pages of the query's relations are cached (`pg_buffercache`). The replay decides hit or read from this.
+4. **Execute.** Run `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)`. This gives the real plan tree, estimated vs. actual rows per node, and real buffer hits and reads.
+5. **Get the result.** Run the query itself for the result rows, then snapshot the cache again: this is what the query leaves behind.
+6. **Inspect.** Read the pages the plan touches: B-tree root-to-leaf paths and leaf pages (`bt_page_items`; posting lists from B-tree deduplication included), and heap pages (`heap_page_items`). Pages are fetched lazily, in batches, and memoized for the run.
+7. **Replay.** Walk the plan tree and emit a trace (below).
+8. **Validate.** Compare the replay with steps 4 and 5 (see Validator).
+9. **Restore the cache.** Inspection reads pages through shared buffers too. Evict each buffer that wasn't in the second snapshot (`pg_buffercache_evict`), so the next run sees exactly the cache this query left behind.
 
 Other statements (DDL, DML, `ANALYZE`, `VACUUM`) just run. After each run (one statement or Run all), the autovacuum simulator checks thresholds, then the schema browser and page views refresh.
 
@@ -47,11 +51,13 @@ Other statements (DDL, DML, `ANALYZE`, `VACUUM`) just run. After each run (one s
 - **Sending:** each statement goes to Postgres with the simple query protocol, as psql sends it, and the reply is decoded on the main thread. PGlite's worker proxy would otherwise drop an error's position, DETAIL and HINT. Values are kept as Postgres's text (no conversion to JavaScript dates or objects), and notices are kept.
 - **Results** are capped at 1,000 displayed rows (the total count is always reported). After each run the catalog (schema browser and editor completion) and the seed version are reloaded.
 
-### Inspector (worker)
-Typed wrappers around `pageinspect` and `pg_buffercache`. Decodes index keys from raw bytes for simple fixed-width types (int, bigint, date, timestamp). For other types it reads the key from the heap row the index entry points to, evaluating the index's column expressions in SQL.
+### Inspector (main thread)
+Typed wrappers around `pageinspect` and `pg_buffercache`. Like the statement runner, it sends queries with `execProtocolRaw`, and reads pages in batches: each query through the worker proxy costs about a millisecond on top of Postgres's own work ([ADR 0022](decisions/0022-replay-pipeline-placement-and-buffer-counts.md)). Decodes index keys from raw bytes for simple fixed-width types (int, bigint, date, timestamp). For other types it reads the key from the heap row the index entry points to, evaluating the index's column expressions in SQL.
 
-### Replay engine (worker)
+### Replay engine (main thread)
 One replayer per plan node type. Each mirrors the executor's demand-pull iterator model (each node pulls rows from its children one at a time), written as TypeScript generators so v2 joins compose naturally. Replayers emit trace events and pass rows to their parent.
+
+Buffer accesses follow the executor: a page access is a hit if the page was in the snapshot (step 3) or was already read earlier in this run, and a read otherwise. An index scan keeps its heap page pinned while consecutive index entries point into it, and only counts an access when it moves to another page. Index scans never read the B-tree metapage during execution (Postgres keeps it in memory after planning). Planning's own reads are not animated; the plan view reports them as a note.
 
 Replayers never re-implement SQL semantics. Whether a row passes a `Filter` or `Index Cond` is asked of Postgres with a helper query built from the plan's deparsed expressions, e.g. `SELECT ctid FROM orders WHERE <filter>`, which returns the set of passing `ctid`s. Plans that reference parameters, subplans, or InitPlans are out of v1 scope.
 
@@ -72,7 +78,7 @@ An ordered list of small, engine-agnostic events. Each has a type, the plan node
 
 Engine-specific code (Postgres runner, inspector, replayers) sits behind a `DatabaseEngine` interface. The trace, player, and visualization know nothing Postgres-specific beyond vocabulary, so other databases can be added later.
 
-### Validator (worker)
+### Validator (main thread)
 Checks that the replay matches reality:
 
 - The emitted rows equal the real result (as a multiset, or in order when the query has `ORDER BY`).
@@ -121,6 +127,8 @@ The database is stored in the browser's IndexedDB (PGlite data dir `idb://sql-ex
 ## Risks and open questions
 
 - **Hosting headers.** GitHub Pages cannot set custom HTTP headers. PGlite is expected not to need any (no `SharedArrayBuffer`); M0 verifies this. Fallback: Cloudflare Pages.
-- **Volatile queries.** Steps 2 and 3 execute the query twice. Queries with `random()`, `now()`, etc. may differ between executions; the validator will flag them.
+- **Persistence cost.** PGlite saves the database to IndexedDB after every query, reads included, and by default waits for the save: about 40 ms per query, and about 280 ms for `db.query` through the worker proxy. `relaxedDurability` removes the wait (to be switched on in its own PR; see [ADR 0022](decisions/0022-replay-pipeline-placement-and-buffer-counts.md)).
+- **Ring buffers.** A Seq Scan of a table larger than a quarter of shared buffers (4,096 pages in PGlite) uses a small ring of buffers, which the replay does not model. No seed table comes close; the validator flags a learner's table that does.
+- **Volatile queries.** Steps 4 and 5 execute the query twice. Queries with `random()`, `now()`, etc. may differ between executions; the validator will flag them.
 - **Autovacuum counters.** PGlite keeps `pg_stat_user_tables` up to date, but only publishes a session's counts when forced or a second after the last flush, and starts them from zero on every page load. The simulator forces a flush before reading, and accepts the reset, as after a crash on a real server ([ADR 0021](decisions/0021-autovacuum-simulator.md)).
 - **Other databases.** MySQL/MariaDB have no maintained browser build. Supporting them later may require a different engine approach; the engine-agnostic trace and visualization keep that option open.
