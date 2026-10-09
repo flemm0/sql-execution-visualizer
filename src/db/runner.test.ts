@@ -1,0 +1,154 @@
+import type { PGlite } from '@electric-sql/pglite'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { createDatabase } from './createDatabase'
+import { MAX_DISPLAYED_ROWS, runAll, runStatementAt, type StatementResult } from './runner'
+import { seedDatabase } from './seed'
+
+let db: PGlite
+
+beforeAll(async () => {
+  db = await createDatabase()
+  await seedDatabase(db)
+}, 120_000)
+afterAll(() => db.close())
+
+/** Narrows a result to one status, failing the test with the actual result otherwise. */
+function expectStatus<S extends StatementResult['status']>(result: StatementResult, status: S) {
+  expect(result, JSON.stringify(result, null, 2).slice(0, 500)).toMatchObject({ status })
+  return result as Extract<StatementResult, { status: S }>
+}
+
+async function runOne(sql: string) {
+  const [result] = await runStatementAt(db, sql, 0)
+  return result
+}
+
+describe('running the statement under the cursor', () => {
+  it('runs only that statement', async () => {
+    const sql = 'SELECT 1 AS a;\nSELECT 2 AS b;\nSELECT 3 AS c;'
+    const results = await runStatementAt(db, sql, sql.indexOf('2'))
+    expect(results).toHaveLength(1)
+    const result = expectStatus(results[0], 'rows')
+    expect(result.columns).toEqual(['b'])
+    expect(result.rows).toEqual([['2']])
+  })
+
+  it('returns nothing for an editor with no statements', async () => {
+    expect(await runStatementAt(db, '-- nothing yet', 0)).toEqual([])
+  })
+})
+
+describe('a query', () => {
+  it('returns Postgres’s own text for each value, and NULL as null', async () => {
+    const result = expectStatus(
+      await runOne(`SELECT id, order_date, total, NULL AS nothing, true AS yes FROM orders WHERE id = 4242`),
+      'rows',
+    )
+    expect(result.columns).toEqual(['id', 'order_date', 'total', 'nothing', 'yes'])
+    const [row] = result.rows
+    expect(row[0]).toBe('4242')
+    // A date stays a date: not converted to a JavaScript Date in some time zone.
+    expect(row[1]).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(row[2]).toMatch(/^\d+\.\d{2}$/)
+    expect(row.slice(3)).toEqual([null, 't'])
+  })
+
+  it('comes with its real plan, including actual rows and buffer counts', async () => {
+    const result = expectStatus(await runOne('SELECT * FROM orders WHERE id = 4242'), 'rows')
+    const plan = result.plan
+    expect(plan).not.toBeNull()
+    expect(plan?.root.title).toBe('Index Scan using orders_pkey on orders')
+    expect(plan?.root.estimatedRows).toBe(1)
+    expect(plan?.root.actualRows).toBe(1)
+    expect(plan?.root.loops).toBe(1)
+    expect((plan?.root.sharedHit ?? 0) + (plan?.root.sharedRead ?? 0)).toBeGreaterThan(0)
+    expect(plan?.root.details).toContainEqual({ label: 'Index Cond', value: '(orders.id = 4242)' })
+    expect(plan?.executionMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it('shows a plan that changes when an index is created', async () => {
+    const query = 'SELECT * FROM order_items WHERE product_id = 42'
+    const before = expectStatus(await runOne(query), 'rows')
+    expect(before.plan?.root.nodeType).toBe('Seq Scan')
+    expect(before.plan?.root.details.map((detail) => detail.label)).toContain('Rows Removed by Filter')
+
+    await runOne('CREATE INDEX order_items_product_id_idx ON order_items (product_id)')
+    const after = expectStatus(await runOne(query), 'rows')
+    const titles = [after.plan?.root.title, ...(after.plan?.root.children ?? []).map((child) => child.title)]
+    expect(titles.join(' / ')).toContain('order_items_product_id_idx')
+    // The same rows either way.
+    expect(after.totalRows).toBe(before.totalRows)
+
+    await runOne('DROP INDEX order_items_product_id_idx')
+  })
+
+  it('shows at most 1,000 rows but reports the total', async () => {
+    const result = expectStatus(await runOne('SELECT * FROM order_items'), 'rows')
+    const total = await db.query<{ count: number }>('SELECT count(*)::int AS count FROM order_items')
+    expect(result.rows).toHaveLength(MAX_DISPLAYED_ROWS)
+    expect(result.totalRows).toBe(total.rows[0].count)
+  })
+
+  it('runs a statement that writes inside WITH only once, without a plan', async () => {
+    await runOne('CREATE TABLE once (n int)')
+    const result = expectStatus(await runOne('WITH added AS (INSERT INTO once VALUES (1) RETURNING n) SELECT * FROM added'), 'rows')
+    expect(result.plan).toBeNull()
+    const count = await db.query<{ count: number }>('SELECT count(*)::int AS count FROM once')
+    expect(count.rows[0].count).toBe(1)
+    await runOne('DROP TABLE once')
+  })
+})
+
+describe('other statements', () => {
+  it('report done, with the number of rows changed by writes', async () => {
+    expectStatus(await runOne('CREATE TABLE notes (id int, body text)'), 'done')
+    const insert = expectStatus(await runOne(`INSERT INTO notes VALUES (1, 'a'), (2, 'b')`), 'done')
+    expect(insert.command).toBe('INSERT')
+    expect(insert.affectedRows).toBe(2)
+    const update = expectStatus(await runOne(`UPDATE notes SET body = 'c' WHERE id = 2`), 'done')
+    expect(update.affectedRows).toBe(1)
+    const vacuum = expectStatus(await runOne('VACUUM notes'), 'done')
+    expect(vacuum.affectedRows).toBeNull()
+    const drop = expectStatus(await runOne('DROP TABLE notes'), 'done')
+    expect(drop.command).toBe('DROP TABLE')
+  })
+
+  it('pass on Postgres’s notices', async () => {
+    const drop = expectStatus(await runOne('DROP TABLE IF EXISTS never_created'), 'done')
+    expect(drop.notices).toEqual(['NOTICE: table "never_created" does not exist, skipping'])
+  })
+
+  it('return rows when they have any, without a plan', async () => {
+    const result = expectStatus(await runOne('SHOW block_size'), 'rows')
+    expect(result.rows).toEqual([['8192']])
+    expect(result.plan).toBeNull()
+  })
+})
+
+describe('errors', () => {
+  it('carry Postgres’s message and the position in the editor text', async () => {
+    const sql = 'SELECT 1;\nSELECT * FROM nope;'
+    const [result] = await runStatementAt(db, sql, sql.indexOf('nope'))
+    const error = expectStatus(result, 'error')
+    expect(error.message).toBe('relation "nope" does not exist')
+    expect(error.position).toBe(sql.indexOf('nope'))
+  })
+
+  it('carry Postgres’s DETAIL, HINT and SQLSTATE code', async () => {
+    const duplicate = expectStatus(await runOne(`INSERT INTO categories VALUES (1, 'again', 'again')`), 'error')
+    expect(duplicate.message).toBe('duplicate key value violates unique constraint "categories_pkey"')
+    expect(duplicate.detail).toBe('Key (id)=(1) already exists.')
+    expect(duplicate.code).toBe('23505')
+
+    const noFunction = expectStatus(await runOne('SELECT lower(1)'), 'error')
+    expect(noFunction.hint).toContain('explicit type casts')
+  })
+
+  it('stop Run all; the statements after the error are skipped', async () => {
+    const results = await runAll(db, 'CREATE TABLE t1 (a int);\nINSERT INTO missing VALUES (1);\nDROP TABLE t1;')
+    expect(results.map((result) => result.status)).toEqual(['done', 'error', 'skipped'])
+    const exists = await db.query(`SELECT to_regclass('t1') IS NOT NULL AS found`)
+    expect(exists.rows).toEqual([{ found: true }])
+    await db.exec('DROP TABLE t1')
+  })
+})
