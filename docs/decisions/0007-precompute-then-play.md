@@ -7,7 +7,7 @@
 Learners need to pause, step backward, and scrub, not just watch.
 
 ## Decision
-On Run, the worker computes the whole trace (with condensed stretches expanded lazily), then the player plays it back with:
+On Run, the app computes the whole trace (on the main thread, over the worker connection: [ADR 0022](0022-replay-pipeline-placement-and-buffer-counts.md)) (with condensed stretches expanded lazily), then the player plays it back with:
 
 - play/pause and step back/forward
 - a timeline scrubber
