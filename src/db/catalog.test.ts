@@ -122,4 +122,13 @@ describe('catalog after a learner changes the schema', () => {
     const orders = catalog.schemas.find((schema) => schema.name === 'public')?.tables.find((t) => t.name === 'orders')
     expect(orders?.indexes.map((index) => index.name)).toContain('orders_status_idx')
   })
+
+  it('includes each table\'s autovacuum counters, up to the statement that just ran', async () => {
+    await db.exec(`UPDATE customers SET city = city WHERE id <= 300`)
+    const catalog = await loadCatalog(db)
+    const customers = catalog.schemas.find((schema) => schema.name === 'public')?.tables.find((t) => t.name === 'customers')
+    expect(customers?.autovacuum?.activity.changedSinceAnalyze).toBe(300)
+    // 10,000 rows: analyzed above 50 + 10%.
+    expect(customers?.autovacuum?.assessment).toMatchObject({ changedRows: { count: 300, threshold: 1050 }, analyze: false })
+  })
 })

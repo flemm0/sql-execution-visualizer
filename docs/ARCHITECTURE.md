@@ -8,6 +8,7 @@ A static single-page app. All database work happens in the visitor's browser, in
 │                         ▲                                           │
 │                 Player (trace, position, speed, condensing)         │
 │ Statement runner (split, classify, decode Postgres's replies)       │
+│ Autovacuum simulator (after each run)                               │
 └─────────────────────────┬───────────────────────────────────────────┘
                           │ messages (statements, traces, page data)
 ┌─────────────────────────▼──────── Web Worker ───────────────────────┐
@@ -17,7 +18,6 @@ A static single-page app. All database work happens in the visitor's browser, in
 │ Inspector  (reads real heap / B-tree pages and cache state)         │
 │ Replay engine (re-walks the real plan over real pages → trace)      │
 │ Validator  (replay vs. real result and EXPLAIN ANALYZE counts)      │
-│ Autovacuum simulator                                                │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -35,7 +35,7 @@ Postgres exposes *what* happened (the plan, the result, and per-node totals in `
 6. **Validate.** Compare the replay with steps 2 and 3 (see Validator).
 7. **Restore the cache.** Inspection reads pages through shared buffers too. Evict pages loaded only by inspection, so the next run sees exactly the cache this query left behind.
 
-Other statements (DDL, DML, `ANALYZE`, `VACUUM`) just run; the schema browser and page views refresh, then the autovacuum simulator checks thresholds.
+Other statements (DDL, DML, `ANALYZE`, `VACUUM`) just run. After each run (one statement or Run all), the autovacuum simulator checks thresholds, then the schema browser and page views refresh.
 
 ## Components
 
@@ -87,13 +87,22 @@ Holds the trace and the playback position. Supports play/pause, step forward and
 - **Condensing.** A condensing pass groups repetitive runs of real events into **stretches** so a run fits the ~30 s budget at normal speed ([ADR 0005](decisions/0005-realistic-data-and-30s-budget.md)).
 - **Lazy detail.** Stretch summaries carry exact counts. Their full detail is computed only when a stretch is expanded. This keeps a 200,000-row Seq Scan cheap.
 
-### Autovacuum simulator (worker)
-PGlite has no autovacuum. After each write, read `pg_stat_user_tables` and apply Postgres's default autovacuum thresholds (analyze: 50 rows + 10% of the table changed; vacuum: 50 + 20% dead rows; insert-vacuum: 1,000 + 20% inserted). When crossed, run `ANALYZE` / `VACUUM` on that table and show a notice. A setting turns it off. See [ADR 0014](decisions/0014-simulated-autovacuum.md).
+### Autovacuum simulator (main thread)
+`src/db/autovacuum.ts`; the decisions are in [ADR 0014](decisions/0014-simulated-autovacuum.md) and [ADR 0021](decisions/0021-autovacuum-simulator.md).
+
+PGlite has no autovacuum. After each run, unless the visitor is inside a transaction block:
+
+1. **Flush the counters.** `SELECT pg_stat_force_next_flush()`. PGlite never runs the timer a real server uses to publish a session's pending counts, so without it recent writes can be missing from `pg_stat_user_tables`.
+2. **Read** each table's `n_dead_tup`, `n_ins_since_vacuum` and `n_mod_since_analyze`, its `reltuples`, `relpages` and `relallfrozen`, its storage parameters, and the `autovacuum_*` settings.
+3. **Decide** as Postgres 18's `relation_needs_vacanalyze` does. With the default settings: vacuum when dead rows > 50 + 20% of `reltuples` (capped at `autovacuum_vacuum_max_threshold`), or rows inserted since the last vacuum > 1,000 + 20% of the not-yet-frozen rows; analyze when rows changed since the last analyze > 50 + 10%.
+4. **Act:** `VACUUM`, `ANALYZE`, or both as one `VACUUM (ANALYZE)`, and show a toast saying which counter crossed which threshold.
+
+The **Autovacuum** checkbox in the editor toolbar turns it off. The schema browser reads the same counters (`loadCatalog` flushes first) to show how fresh each table's statistics are.
 
 ### Persistence and seeding (worker)
 The database is stored in the browser's IndexedDB (PGlite data dir `idb://sql-execution-visualizer`). With several tabs open, PGlite elects one tab's worker to run Postgres and the others forward queries to it.
 
-- **First load:** the worker's `init` generates the seed data in SQL from a fixed random seed, then `VACUUM ANALYZE`s it (about a second, so no prebuilt data directory is needed). The seed runs in one transaction, so an interrupted seed leaves nothing behind.
+- **First load:** the worker's `init` generates the seed data in SQL from a fixed random seed, flushes the statistics counters, then `VACUUM ANALYZE`s it (about a second, so no prebuilt data directory is needed). The seed runs in one transaction, so an interrupted seed leaves nothing behind.
 - **Seed version:** stored in `visualizer.seed_info`, a schema of its own outside `public`. When a release bumps `SEED_VERSION`, the UI offers a reset instead of resetting on its own.
 - **Reset database:** drops every non-system schema (including `public`, which takes `pageinspect` and `pg_buffercache` with it), recreates `public` and the extensions, and seeds again. Pages and `ctid`s come out identical to a first load; transaction IDs (`xmin`) are higher.
 - **UI settings** (theme, pane sizes) are not in the database: they live in `localStorage`, read and written through `src/storage.ts`, which ignores storage errors so a browser that blocks site data still works, just without remembering them. Reset database leaves them alone.
@@ -113,5 +122,5 @@ The database is stored in the browser's IndexedDB (PGlite data dir `idb://sql-ex
 
 - **Hosting headers.** GitHub Pages cannot set custom HTTP headers. PGlite is expected not to need any (no `SharedArrayBuffer`); M0 verifies this. Fallback: Cloudflare Pages.
 - **Volatile queries.** Steps 2 and 3 execute the query twice. Queries with `random()`, `now()`, etc. may differ between executions; the validator will flag them.
-- **Autovacuum counters.** The autovacuum simulator depends on `pg_stat_user_tables` counters being maintained in PGlite's single-process mode. A first check in M1 looks off: right after the seed's `VACUUM ANALYZE` plus 100 updates, `orders` reports `n_live_tup` 100,000 (twice the real count) and `n_mod_since_analyze` 50,000. To investigate in the autovacuum simulator PR (stats flushing, or counting from `pg_stat_user_tables` deltas ourselves).
+- **Autovacuum counters.** PGlite keeps `pg_stat_user_tables` up to date, but only publishes a session's counts when forced or a second after the last flush, and starts them from zero on every page load. The simulator forces a flush before reading, and accepts the reset, as after a crash on a real server ([ADR 0021](decisions/0021-autovacuum-simulator.md)).
 - **Other databases.** MySQL/MariaDB have no maintained browser build. Supporting them later may require a different engine approach; the engine-agnostic trace and visualization keep that option open.

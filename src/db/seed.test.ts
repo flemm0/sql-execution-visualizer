@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { flushStatistics } from './autovacuum'
 import { createDatabase } from './createDatabase'
 import { SEED_VERSION, readSeedInfo, resetDatabase, seedDatabase } from './seed'
 
@@ -101,6 +102,15 @@ describe('seed data', () => {
     for (const table of tables.rows) expect(table.relallvisible, table.relname).toBe(table.relpages)
   })
 
+  it('leaves the autovacuum counters as a real VACUUM ANALYZE would', async () => {
+    await flushStatistics(db)
+    const stats = await db.query<{ live: number; changed: number; inserted: number }>(
+      `SELECT n_live_tup::int AS live, n_mod_since_analyze::int AS changed, n_ins_since_vacuum::int AS inserted
+       FROM pg_stat_user_tables WHERE relname = 'orders'`,
+    )
+    expect(stats.rows[0]).toEqual({ live: 50000, changed: 0, inserted: 0 })
+  })
+
   it('continues identity columns after the generated ids', async () => {
     const inserted = await db.query<{ id: number }>(
       `INSERT INTO categories (name, description) VALUES ('Test', 'Test') RETURNING id`,
@@ -114,6 +124,28 @@ describe('seed data', () => {
     // in seed.ts and update SEED_FINGERPRINT above.
     expect(await fingerprint(db)).toBe(SEED_FINGERPRINT)
   })
+
+  it('publishes the insert counts before VACUUM ANALYZE, so they can\'t land on top of it afterwards', async () => {
+    // The check above only fails when the seed finishes within a second of Postgres's
+    // last statistics flush, so this one checks the order of the calls directly.
+    const fresh = await createDatabase()
+    const query = vi.spyOn(fresh, 'query')
+    const exec = vi.spyOn(fresh, 'exec')
+    await seedDatabase(fresh)
+    const calls = [
+      ...query.mock.calls.map(([sql], index) => ({ sql, order: query.mock.invocationCallOrder[index] })),
+      ...exec.mock.calls.map(([sql], index) => ({ sql, order: exec.mock.invocationCallOrder[index] })),
+    ]
+      .sort((a, b) => a.order - b.order)
+      .map((call) => call.sql)
+    const seeded = calls.findIndex((sql) => sql.includes('COMMIT'))
+    const flushed = calls.findIndex((sql) => sql.includes('pg_stat_force_next_flush()'))
+    const vacuumed = calls.findIndex((sql) => sql.startsWith('VACUUM ANALYZE'))
+    expect(seeded).toBeGreaterThanOrEqual(0)
+    expect(flushed).toBeGreaterThan(seeded)
+    expect(vacuumed).toBeGreaterThan(flushed)
+    await fresh.close()
+  }, 120_000)
 
   it('reset drops learner changes and restores the seed', async () => {
     await db.exec(`
