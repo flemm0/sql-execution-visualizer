@@ -15,6 +15,7 @@ const orders: TableInfo = {
   indexes: [
     { name: 'orders_pkey', definition: '', unique: true, primaryKey: true, levels: 2, pages: 139 },
   ],
+  autovacuum: null,
 }
 
 const database: DatabaseInfo = {

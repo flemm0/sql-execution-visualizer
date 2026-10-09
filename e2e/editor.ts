@@ -28,8 +28,18 @@ export async function setEditorText(page: Page, text: string) {
  * Callers then wait for what they expect to see: Playwright's expect retries.
  */
 export async function runSql(page: Page, text: string) {
+  // Like a visitor, wait for the previous run to finish: until it has, Run is disabled.
+  await waitForRunToFinish(page)
   await setEditorText(page, text)
   await page.keyboard.press('Shift+ControlOrMeta+Enter')
+}
+
+/**
+ * Waits until the last run is completely finished: after its results show,
+ * the autovacuum simulator and the schema reload still run, with Run disabled.
+ */
+export async function waitForRunToFinish(page: Page) {
+  await expect(page.getByRole('button', { name: 'Run', exact: true })).toBeEnabled()
 }
 
 /** The status lines of the last run, e.g. ["✓ SELECT: 1 row, 3.2 ms"]. */

@@ -1,10 +1,12 @@
 import type { PGliteInterface } from '@electric-sql/pglite'
 import type { EditorView } from '@codemirror/view'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { AutovacuumToasts, type AutovacuumNotice } from './autovacuum/AutovacuumToasts'
+import { runAutovacuum, type AutovacuumAction } from './db/autovacuum'
 import { loadCatalog, postgresVersion, type DatabaseInfo } from './db/catalog'
 import { connectToDatabase } from './db/client'
 import type { Plan } from './db/plan'
-import { runAll, runStatementAt, type StatementResult } from './db/runner'
+import { inTransaction, runAll, runStatementAt, type StatementResult } from './db/runner'
 import { SEED_VERSION, readSeedInfo, resetDatabase, type SeedInfo } from './db/seed'
 import { SqlEditor, selectInEditor, type RunMode } from './editor/SqlEditor'
 import { APP_NAME, Header } from './layout/Header'
@@ -50,6 +52,8 @@ type RunState =
 
 /** Where the editor's text is kept between visits (localStorage, like the other UI settings). */
 const EDITOR_TEXT_KEY = 'editor-text'
+/** Remembers whether the autovacuum simulator is turned off ('off'); on unless turned off. */
+const AUTOVACUUM_KEY = 'autovacuum'
 
 const STARTING_SQL = `-- Press Cmd/Ctrl+Enter to run the statement under the cursor,
 -- or Shift+Cmd/Ctrl+Enter to run them all.
@@ -66,6 +70,18 @@ export default function App() {
   const [state, setState] = useState<State>({ status: 'loading' })
   const [run, setRun] = useState<RunState>({ status: 'idle' })
   const editorView = useRef<EditorView | null>(null)
+  // True from a run's results until autovacuum and the catalog reload after it are done.
+  // Run stays disabled meanwhile, so two things never query the database at once (ADR 0020).
+  const [tidyingUp, setTidyingUp] = useState(false)
+  const [autovacuumOn, setAutovacuumOn] = useState(() => readSetting(AUTOVACUUM_KEY) !== 'off')
+  const [notices, setNotices] = useState<AutovacuumNotice[]>([])
+  const nextNoticeId = useRef(1)
+
+  // useCallback keeps the same function between renders, so each notice's
+  // timer (which depends on it) isn't restarted every time App renders.
+  const dismissNotice = useCallback((id: number) => {
+    setNotices((current) => current.filter((notice) => notice.id !== id))
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -84,19 +100,28 @@ export default function App() {
 
   async function runSql(mode: RunMode) {
     const view = editorView.current
-    if (view === null || state.status !== 'ready' || run.status === 'running') return
+    if (view === null || state.status !== 'ready' || run.status === 'running' || tidyingUp) return
     const sql = view.state.doc.toString()
     const cursor = view.state.selection.main.head
     setRun({ status: 'running' })
+    const db = await getDatabase()
     try {
-      const db = await getDatabase()
       const results = mode === 'all' ? await runAll(db, sql) : await runStatementAt(db, sql, cursor)
       setRun({ status: 'done', results, sql })
+      setTidyingUp(true)
     } catch (error) {
       // Postgres errors are results; this is the database connection itself failing.
       setRun({ status: 'idle' })
       setState({ status: 'error', message: String(error) })
       return
+    }
+    if (autovacuumOn) {
+      try {
+        showNotices(await autovacuum(db))
+      } catch (error) {
+        // The run itself worked; keep its results. The next run checks again.
+        console.error('The autovacuum simulator failed:', error)
+      }
     }
     // The statement may have changed the schema (or the seed version), so reload them.
     // A failed transaction makes every query fail until ROLLBACK; then keep what's shown.
@@ -105,6 +130,17 @@ export default function App() {
     } catch {
       // Refreshed after the next statement instead.
     }
+    setTidyingUp(false)
+  }
+
+  function showNotices(actions: AutovacuumAction[]) {
+    const added = actions.map((action) => ({ id: nextNoticeId.current++, action }))
+    setNotices((current) => [...current, ...added])
+  }
+
+  function toggleAutovacuum(on: boolean) {
+    setAutovacuumOn(on)
+    saveSetting(AUTOVACUUM_KEY, on ? 'on' : 'off')
   }
 
   function showPosition(position: number) {
@@ -125,7 +161,7 @@ export default function App() {
 
   const overview = state.status === 'ready' ? state.overview : null
   const seedOutdated = overview !== null && overview.seed?.version !== SEED_VERSION
-  const canRun = state.status === 'ready' && run.status !== 'running'
+  const canRun = state.status === 'ready' && run.status !== 'running' && !tidyingUp
   // The plan of the last query in the run, if any.
   const plan: Plan | null =
     run.status === 'done'
@@ -155,7 +191,7 @@ export default function App() {
         <Workspace
           schemaBrowser={
             overview ? (
-              <SchemaBrowser database={overview.catalog} />
+              <SchemaBrowser database={overview.catalog} autovacuumOn={autovacuumOn} />
             ) : (
               <Placeholder>
                 {state.status === 'resetting'
@@ -187,6 +223,13 @@ export default function App() {
               <button type="button" className="btn text-xs" onClick={reset} disabled={state.status !== 'ready'}>
                 Reset database
               </button>
+              <label
+                className="ml-2 flex items-center gap-1.5 text-xs text-fg-muted"
+                title="After each run, vacuum and analyze the tables that crossed Postgres's autovacuum thresholds, as a real server would within a minute. Turn off to study stale statistics."
+              >
+                <input type="checkbox" checked={autovacuumOn} onChange={(event) => toggleAutovacuum(event.target.checked)} />
+                Autovacuum
+              </label>
             </>
           }
           editor={
@@ -232,8 +275,19 @@ export default function App() {
           </>
         )}
       </footer>
+      <AutovacuumToasts notices={notices} onDismiss={dismissNotice} />
     </div>
   )
+}
+
+/**
+ * Runs the autovacuum simulator after a run, unless the visitor is inside a
+ * transaction block: VACUUM can't run there, and a real autovacuum worker
+ * can't see uncommitted changes anyway. It runs once the transaction ends.
+ */
+async function autovacuum(db: PGliteInterface): Promise<AutovacuumAction[]> {
+  if (await inTransaction(db)) return []
+  return runAutovacuum(db)
 }
 
 function planPlaceholder(run: RunState) {

@@ -1,4 +1,12 @@
 import type { PGliteInterface } from '@electric-sql/pglite'
+import {
+  assessTable,
+  flushStatistics,
+  readAutovacuumSettings,
+  readTableActivity,
+  type Assessment,
+  type TableActivity,
+} from './autovacuum'
 
 /** What the schema browser shows: the database, its schemas, and their tables. */
 export interface DatabaseInfo {
@@ -22,6 +30,8 @@ export interface TableInfo {
   sizeBytes: number
   columns: ColumnInfo[]
   indexes: IndexInfo[]
+  /** Autovacuum's counters for the table and what it would do now; null for partitioned tables, which it skips. */
+  autovacuum: { activity: TableActivity; assessment: Assessment } | null
 }
 
 export interface ColumnInfo {
@@ -86,6 +96,13 @@ export async function loadCatalog(db: PGliteInterface): Promise<DatabaseInfo> {
       pages: row.index_pages,
     })
   }
+  // A separate query first, so the counters include the statement that just ran.
+  await flushStatistics(db)
+  const settings = await readAutovacuumSettings(db)
+  for (const activity of await readTableActivity(db)) {
+    const table = tables.get(`${activity.schema}.${activity.name}`)
+    if (table) table.autovacuum = { activity, assessment: assessTable(activity, settings) }
+  }
 
   return { name: database.rows[0].name, schemas: [...schemas.values()] }
 }
@@ -119,6 +136,7 @@ async function listTables(db: PGliteInterface): Promise<TableInfo[]> {
     sizeBytes: row.table_bytes,
     columns: [],
     indexes: [],
+    autovacuum: null,
   }))
 }
 

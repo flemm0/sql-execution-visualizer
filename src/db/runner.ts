@@ -137,6 +137,21 @@ export async function runStatement(db: PGliteInterface, statement: Statement): P
   }
 }
 
+/**
+ * Whether the session is inside a transaction block (after BEGIN, before
+ * COMMIT or ROLLBACK), including one that failed. Postgres reports this at
+ * the end of every reply; an empty query asks for it without doing anything.
+ */
+export async function inTransaction(db: PGliteInterface): Promise<boolean> {
+  const reply = await db.execProtocolRaw(protocol.serialize.query(''))
+  let status = 'I'
+  new protocol.Parser().parse(reply, (message) => {
+    // 'I' idle, 'T' in a transaction block, 'E' in a failed one.
+    if (message instanceof messages.ReadyForQueryMessage) status = message.status
+  })
+  return status !== 'I'
+}
+
 type SimpleQueryReply =
   | { status: 'ok'; results: Results[]; notices: string[] }
   | { status: 'error'; error: messages.DatabaseError; notices: string[] }
