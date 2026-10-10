@@ -2,6 +2,7 @@ import type { PGliteInterface } from '@electric-sql/pglite'
 import { readBtreeMeta, readBtreePages, type BtreeItem, type BtreePage, type IndexColumn, type Relation, type Tid } from '../db/inspector'
 import { query } from '../db/query'
 import { readKey } from './indexKeys'
+import type { IndexPageContents } from './trace'
 import { canStep, KeyComparisons, nextValue, previousValue } from './keyComparisons'
 
 /*
@@ -133,6 +134,8 @@ const NSKIPADVANCES_THRESHOLD = 3
 export interface BtreeWalk {
   steps: IndexStep[]
   skipScan: boolean
+  /** Every page the walk read, with its items' keys as Postgres writes them, in the order first read. */
+  pages: IndexPageContents[]
 }
 
 /**
@@ -147,10 +150,14 @@ export async function walkBtree(
 ): Promise<BtreeWalk> {
   const keyColumns = columns.filter((column) => column.isKey)
   const preprocessed = await preprocessKeys(db, keyColumns, keys)
-  if (preprocessed === null) return { steps: [], skipScan: false }
+  if (preprocessed === null) return { steps: [], skipScan: false, pages: [] }
   const scan = new BtreeScan(db, index, columns, preprocessed)
   await scan.run()
-  return { steps: scan.steps, skipScan: preprocessed.some((key) => key.array?.kind === 'skip') }
+  return {
+    steps: scan.steps,
+    skipScan: preprocessed.some((key) => key.array?.kind === 'skip'),
+    pages: [...scan.contents.values()],
+  }
 }
 
 /**
@@ -244,6 +251,8 @@ function quote(text: string) {
 /** One forward scan through a B-tree, with its scan keys' state (BTScanOpaque). */
 class BtreeScan {
   steps: IndexStep[] = []
+  /** The pages read so far, with their keys as text, by block. */
+  contents = new Map<number, IndexPageContents>()
   private keyColumns: IndexColumn[]
   private comparisons: KeyComparisons
   private pages = new Map<number, BtreePage>()
@@ -363,7 +372,32 @@ class BtreeScan {
     })
     const keyed = items.map((item) => ({ ...item, values: item.values.map((value, i) => cast(value, this.keyColumns[i])) }))
     await this.comparisons.prepare(values)
+    if (!this.contents.has(block)) this.contents.set(block, this.pageContents(page, keyed))
     return { page, items: keyed }
+  }
+
+  /** A page's items for the trace, their keys written by Postgres (the query that just compared them did). */
+  private pageContents(page: BtreePage, items: KeyedItem[]): IndexPageContents {
+    const text = (item: KeyedItem) =>
+      item.values.slice(0, item.columns).map((value, column) => this.comparisons.text(column, value))
+    const highKey = items.find((item) => item.item.role === 'highKey')
+    return {
+      relation: this.index.oid,
+      block: page.block,
+      level: page.level,
+      isRoot: page.isRoot,
+      next: page.next,
+      highKey: highKey === undefined ? null : text(highKey),
+      items: items
+        .filter((item) => item.item.role !== 'highKey')
+        .map((item) => ({
+          offset: item.item.offset,
+          key: text(item),
+          child: item.item.childBlock,
+          rows: item.item.heapTids.length,
+          dead: item.item.dead,
+        })),
+    }
   }
 
   /**

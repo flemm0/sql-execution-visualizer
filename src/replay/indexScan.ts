@@ -16,7 +16,7 @@ import { quoteIdentifier } from '../db/sql'
 import { walkBtree, type IndexStep, type ScanKey } from './btreeScan'
 import type { SharedBuffers } from './buffers'
 import { canReadKeys } from './indexKeys'
-import type { TraceEvent } from './trace'
+import type { IndexPageContents, TraceEvent } from './trace'
 import { Unsupported } from './unsupported'
 
 /*
@@ -60,6 +60,8 @@ export interface IndexWalk {
   steps: IndexStep[]
   /** Whether it's a skip scan: the scan moves through every value of an index column without a condition of =. */
   skipScan: boolean
+  /** Every page it read, with its items' keys, for the visualization. */
+  pages: IndexPageContents[]
 }
 
 /**

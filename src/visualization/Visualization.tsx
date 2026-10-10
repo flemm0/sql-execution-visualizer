@@ -1,7 +1,6 @@
 import { useMemo, type ReactNode } from 'react'
 import type { Plan, PlanNode } from '../db/plan'
 import {
-  formatKey,
   rowName,
   shortPageName,
   stateAt,
@@ -14,6 +13,7 @@ import {
 import { usePlayer } from '../player/usePlayer'
 import type { PageRef, Trace, TraceRelation } from '../replay/trace'
 import { allNodes, type Validation } from '../replay/validate'
+import { BtreeView } from './BtreeView'
 import { PlayerControls } from './PlayerControls'
 
 const integer = new Intl.NumberFormat('en-US')
@@ -56,8 +56,8 @@ export function Visualization({ plan, trace, validation }: VisualizationProps) {
           show exactly what Postgres did.
         </p>
       )}
-      <div className="flex min-h-0 flex-1 gap-3 overflow-auto p-3">
-        {state.index && <IndexZone view={state.index} state={state} relations={relations} />}
+      <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto px-3">
+        {state.index && <IndexZone view={state.index} state={state} trace={trace} />}
         <BuffersZone state={state} relations={relations} />
         <HeapZone state={state} />
       </div>
@@ -84,62 +84,40 @@ function NodeLine({ node, state }: { node: PlanNode | null; state: PlaybackState
   )
 }
 
-function Zone({ title, testId, children }: { title: string; testId: string; children: ReactNode }) {
+function Zone({ title, testId, wide = false, children }: { title: string; testId: string; wide?: boolean; children: ReactNode }) {
   return (
-    <section className="flex min-w-48 flex-1 flex-col gap-2" data-testid={testId} aria-label={title}>
+    // Each zone scrolls on its own when the pane is short.
+    <section
+      className={`flex min-h-0 min-w-48 flex-col gap-2 overflow-y-auto py-3 ${wide ? 'flex-[2]' : 'flex-1'}`}
+      data-testid={testId}
+      aria-label={title}
+    >
       <h3 className="text-[11px] tracking-wide text-fg-muted uppercase">{title}</h3>
       {children}
     </section>
   )
 }
 
-/** The current search down the index: the pages it went through, and the entries that matched on its leaf. */
-function IndexZone({ view, state, relations }: { view: IndexView; state: PlaybackState; relations: Map<number, TraceRelation> }) {
-  const current = currentPage(state)
-  const levels = view.path.filter((step) => step.level > 0)
-  const leaves = view.path.filter((step) => step.level === 0)
-  const hiddenLeaves = Math.max(0, leaves.length - 2)
-  const shown = [...levels, ...leaves.slice(hiddenLeaves)]
+/** The current search down the index, drawn as the B-tree pages it went through, with the entries that matched. */
+function IndexZone({ view, state, trace }: { view: IndexView; state: PlaybackState; trace: Trace }) {
+  const pages = useMemo(
+    () => new Map(trace.indexPages.filter((page) => page.relation === view.index.id).map((page) => [page.block, page])),
+    [trace, view.index.id],
+  )
+  // Entries keep every key column, so the longest key is the index's column count.
+  const keyColumns = useMemo(
+    () => Math.max(1, ...trace.indexPages.flatMap((page) => page.items.map((item) => item.key.length))),
+    [trace],
+  )
+  const currentEntry = state.current?.type === 'index.entry' ? state.current.offset : null
   return (
-    <Zone title={`Index ${view.index.name}`} testId="viz-index">
+    <Zone title={`Index ${view.index.name}`} testId="viz-index" wide>
       <p className="font-mono text-fg-muted">
         search {integer.format(view.searches)}
+        {view.leaf && ` · ${integer.format(view.entryCount)} matched on idx p${view.leaf.block}`}
         {view.markedDead > 0 && ` · ${integer.format(view.markedDead)} marked dead`}
       </p>
-      <ol className="flex flex-col gap-1 font-mono" aria-label="Pages this search went through">
-        {shown.map((step, i) => (
-          <li key={i} className="flex flex-col gap-1">
-            {step.level === 0 && i === levels.length && hiddenLeaves > 0 && (
-              <span className="text-fg-muted">… {integer.format(hiddenLeaves)} earlier leaves</span>
-            )}
-            <span
-              className={`rounded border px-2 py-1 ${samePage(step.page, current) ? 'border-index text-fg' : 'border-line text-fg-muted'}`}
-              data-testid="viz-index-page"
-            >
-              <span className="text-index">idx p{step.page.block}</span>{' '}
-              {step.level === 0 ? 'leaf' : `level ${step.level}`}
-              {step.downlink !== null && ` → item ${step.downlink}`}
-              {step.level > 0 && step.downlink === null && ' → right'}
-            </span>
-          </li>
-        ))}
-      </ol>
-      {view.leaf && (
-        <div>
-          <p className="text-fg-muted">
-            {integer.format(view.entryCount)} matching {view.entryCount === 1 ? 'entry' : 'entries'} on idx p{view.leaf.block}
-          </p>
-          <ul className="font-mono" aria-label="Matching entries">
-            {view.entryCount > view.entries.length && <li className="text-fg-muted">…</li>}
-            {view.entries.map((entry) => (
-              <li key={entry.offset} data-testid="viz-index-entry">
-                <span className="text-fg-muted">item {entry.offset}</span> <span className="text-index">{formatKey(entry.key)}</span>{' '}
-                → {shortPageName({ relation: entry.row.relation, block: entry.row.block }, relations)} {rowName(entry.row)}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <BtreeView view={view} pages={pages} keyColumns={keyColumns} current={currentPage(state)} currentEntry={currentEntry} />
     </Zone>
   )
 }

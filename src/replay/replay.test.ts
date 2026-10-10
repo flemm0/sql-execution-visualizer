@@ -244,6 +244,48 @@ describe('replaying an Index Scan', () => {
     ])
   })
 
+  it('example 1: carries the root and the leaf with every item, keys written as Postgres writes them', async () => {
+    const { trace } = await replayed('SELECT * FROM orders WHERE id = 4242')
+    const pkey = trace.relations[2]
+    const [rootVisit, leafVisit] = ofType(trace, 'index.visit')
+    expect(trace.indexPages.map((page) => [page.relation, page.block, page.level])).toEqual([
+      [pkey.id, rootVisit.page.block, 1],
+      [pkey.id, leafVisit.page.block, 0],
+    ])
+    const [root, leaf] = trace.indexPages
+
+    /** A page's items from pageinspect, each key read from its bytes (a 4-byte integer). */
+    async function items(block: number) {
+      const found = await db.query<{ offset: number; ctid: string; data: string; dead: boolean | null }>(
+        `SELECT itemoffset::int AS offset, ctid::text, data, dead FROM bt_page_items('orders_pkey', ${block}) ORDER BY 1`,
+      )
+      return found.rows.map((row) => ({
+        offset: row.offset,
+        child: Number(row.ctid.slice(1).split(',')[0]),
+        dead: row.dead ?? false,
+        key: row.data === '' ? [] : [String(parseInt(row.data.split(' ').slice(0, 4).reverse().join(''), 16))],
+      }))
+    }
+
+    // The root is the only page on its level: no high key, and every item a downlink.
+    const rootItems = await items(root.block)
+    expect(root).toMatchObject({ isRoot: true, next: null, highKey: null })
+    expect(root.items).toEqual(rootItems.map(({ offset, child, key }) => ({ offset, key, child, rows: 0, dead: false })))
+    // The first downlink stands for minus infinity; the one followed points at the leaf.
+    expect(root.items[0].key).toEqual([])
+    expect(root.items.find((item) => item.offset === rootVisit.downlink)?.child).toBe(leaf.block)
+
+    // A leaf: its high key first (unless it's the rightmost), then its entries.
+    const [first, ...entries] = await items(leaf.block)
+    expect(leaf.isRoot).toBe(false)
+    if (leaf.next === null) entries.unshift(first)
+    else expect(leaf.highKey).toEqual(first.key)
+    expect(leaf.items.map((item) => [item.offset, item.key, item.child, item.rows])).toEqual(
+      entries.map(({ offset, key }) => [offset, key, null, 1]),
+    )
+    expect(leaf.items.find((item) => item.offset === ofType(trace, 'index.entry')[0].offset)?.key).toEqual(['4242'])
+  })
+
   it('example 4: walks right along 4 leaves, and reads each of 13 heap pages once, in index order', async () => {
     const { trace } = await replayed('SELECT * FROM orders WHERE id BETWEEN 1000 AND 2000')
     const pkey = trace.relations[2]
@@ -281,6 +323,15 @@ describe('replaying an Index Scan', () => {
     const { trace } = await replayed('SELECT * FROM order_items WHERE order_id = 777 AND line_no > 1')
     expect(ofType(trace, 'index.visit').map((event) => event.level)).toEqual([2, 1, 0])
     expect(ofType(trace, 'index.entry').every((event) => event.key[0] === '777' && Number(event.key[1]) > 1)).toBe(true)
+    // Each downlink followed leads to the next page visited; downlinks keep one or both key columns.
+    const visits = ofType(trace, 'index.visit')
+    const pages = new Map(trace.indexPages.map((page) => [page.block, page]))
+    for (let i = 0; i < 2; i++) {
+      const followed = pages.get(visits[i].page.block)?.items.find((item) => item.offset === visits[i].downlink)
+      expect(followed?.child).toBe(visits[i + 1].page.block)
+    }
+    const downlinks = trace.indexPages.filter((page) => page.level > 0).flatMap((page) => page.items.slice(1))
+    expect(downlinks.every((item) => item.key.length >= 1 && item.key.length <= 2 && /^\d+$/.test(item.key[0] ?? ''))).toBe(true)
   })
 
   it('fetches rows that fail the Filter too, and counts them as removed', async () => {

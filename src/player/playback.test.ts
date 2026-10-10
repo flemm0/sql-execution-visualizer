@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Trace, TraceEvent } from '../replay/trace'
-import { SHOWN_ROWS, formatKey, stateAt, type NodeInfo } from './playback'
+import { SHOWN_ROWS, formatIndexKey, formatKey, stateAt, type NodeInfo } from './playback'
 
 const TABLE = 10
 const INDEX = 20
@@ -10,7 +10,7 @@ const relations: Trace['relations'] = [
 ]
 
 function trace(events: TraceEvent[]): Trace {
-  return { relations, events }
+  return { relations, events, indexPages: [] }
 }
 
 function nodes(info: Partial<NodeInfo> = {}) {
@@ -72,6 +72,7 @@ describe('the state at a step', () => {
       leaf: indexPage(57),
       entries: [{ offset: 7, key: ['42'], row: row(212, 4) }],
       entryCount: 1,
+      matchedOffsets: [7],
     })
     expect(state.heap).toMatchObject({
       page: heapPage(212),
@@ -129,7 +130,8 @@ describe('the state at a step', () => {
     ]
     const right = stateAt(trace(events), nodes(), 5)
     expect(right.caption).toBe('More entries could match on the next leaf, so the scan moves right to index page 2.')
-    expect(right.index).toMatchObject({ leaf: indexPage(2), entries: [], entryCount: 0 })
+    expect(right.index).toMatchObject({ leaf: indexPage(2), entries: [], entryCount: 0, matchedOffsets: [] })
+    expect(stateAt(trace(events), nodes(), 4).index?.matchedOffsets).toEqual([2])
     expect(right.index?.path.map((step) => step.page.block)).toEqual([3, 1, 2])
 
     const again = stateAt(trace(events), nodes(), 6)
@@ -206,6 +208,8 @@ describe('the state at a step', () => {
     const state = stateAt(trace(events), nodes(), events.length)
     expect(state.index?.entryCount).toBe(10)
     expect(state.index?.entries.map((entry) => entry.offset)).toEqual([5, 6, 7, 8, 9, 10])
+    // Every match is remembered for the page box, not just the latest.
+    expect(state.index?.matchedOffsets).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
     expect(state.heap?.rowCount).toBe(10)
     expect(state.heap?.rows).toHaveLength(SHOWN_ROWS)
     expect(state.heap?.rows.every((shown) => shown.outcome === 'emitted')).toBe(true)
@@ -222,6 +226,7 @@ describe('the state at a step', () => {
       2,
     )
     expect(state.index?.markedDead).toBe(2)
+    expect([...(state.index?.deadEntries ?? [])]).toEqual(['4/3', '4/4'])
     expect(state.caption).toBe(
       'No transaction can see the rows of 2 entries on index page 4 any more, so the scan marks them dead; later scans skip them.',
     )
@@ -233,5 +238,17 @@ describe('formatKey', () => {
     expect(formatKey(['42'])).toBe('42')
     expect(formatKey(['777', '2'])).toBe('(777, 2)')
     expect(formatKey([null])).toBe('NULL')
+  })
+})
+
+describe('formatIndexKey', () => {
+  it('writes a key as Postgres wrote its values, minus infinity for what a downlink dropped', () => {
+    expect(formatIndexKey(['4242'], 1)).toBe('4242')
+    expect(formatIndexKey(['777', '2'], 2)).toBe('(777, 2)')
+    // Suffix truncation kept only the first column.
+    expect(formatIndexKey(['777'], 2)).toBe('(777, −∞)')
+    // A page's first downlink keeps no key at all.
+    expect(formatIndexKey([], 2)).toBe('−∞')
+    expect(formatIndexKey([null, 'Mary'], 2)).toBe('(NULL, Mary)')
   })
 })

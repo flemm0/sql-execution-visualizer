@@ -55,8 +55,12 @@ export interface IndexView {
   entries: MatchedEntry[]
   /** How many entries matched on that leaf. */
   entryCount: number
+  /** The offsets of every entry that matched on that leaf, in order. */
+  matchedOffsets: number[]
   /** How many entries the scan has marked dead so far. */
   markedDead: number
+  /** The entries it marked dead, as "block/offset". */
+  deadEntries: Set<string>
 }
 
 /** What happened to a row on the current heap page. */
@@ -219,7 +223,9 @@ function apply(state: PlaybackState, event: TraceEvent, relations: Map<number, T
         leaf: null,
         entries: [],
         entryCount: 0,
+        matchedOffsets: [],
         markedDead: state.index?.markedDead ?? 0,
+        deadEntries: state.index?.deadEntries ?? new Set(),
       }
       break
 
@@ -231,6 +237,7 @@ function apply(state: PlaybackState, event: TraceEvent, relations: Map<number, T
         view.leaf = event.page
         view.entries = []
         view.entryCount = 0
+        view.matchedOffsets = []
       }
       break
     }
@@ -239,12 +246,17 @@ function apply(state: PlaybackState, event: TraceEvent, relations: Map<number, T
       const view = state.index
       if (view === null) break
       view.entryCount++
+      // A posting list's entry matches once for each row it points at.
+      if (view.matchedOffsets.at(-1) !== event.offset) view.matchedOffsets.push(event.offset)
       view.entries = latest(view.entries, { offset: event.offset, key: event.key, row: event.row })
       break
     }
 
     case 'index.markDead':
-      if (state.index) state.index.markedDead += event.offsets.length
+      if (state.index) {
+        state.index.markedDead += event.offsets.length
+        for (const offset of event.offsets) state.index.deadEntries.add(`${event.page.block}/${offset}`)
+      }
       break
 
     case 'heap.tuple': {
@@ -421,4 +433,16 @@ function rowCount(count: number) {
 
 function capitalize(text: string) {
   return text.charAt(0).toUpperCase() + text.slice(1)
+}
+
+/**
+ * A key as the page box writes it: "4242", or "(777, 2)" for several
+ * columns. A downlink keeps only the columns it needs; the ones it dropped,
+ * and the first downlink's whole key, stand for minus infinity (−∞).
+ */
+export function formatIndexKey(key: (string | null)[], keyColumns: number): string {
+  if (key.length === 0) return '−∞'
+  const values = key.map((value) => value ?? 'NULL')
+  while (values.length < keyColumns) values.push('−∞')
+  return values.length === 1 ? values[0] : `(${values.join(', ')})`
 }
