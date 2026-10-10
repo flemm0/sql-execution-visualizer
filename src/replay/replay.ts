@@ -110,9 +110,12 @@ export async function replayQuery(db: PGliteInterface, input: ReplayInput): Prom
     const buffers = new SharedBuffers(input.cacheBefore, relations)
     let events: TraceEvent[]
     const notes: string[] = []
+    let skipScan = false
     if (root.nodeType === 'Index Scan') {
       if (index === null) throw new Error(`${root.title}: no index ${root.indexName}`)
-      events = await replayIndexScan(db, root, table, index, await indexWalk(db, root, index, input.prepared), buffers)
+      const walk = await indexWalk(db, root, index, input.prepared)
+      skipScan = walk.skipScan
+      events = await replayIndexScan(db, root, table, index, walk, buffers)
     } else {
       events = [...seqScanEvents(root, table, await scanPages(db, root, table), buffers)]
       notes.push(...(await ringBufferNotes(db, table)))
@@ -142,11 +145,28 @@ export async function replayQuery(db: PGliteInterface, input: ReplayInput): Prom
       replayedRows,
       notes,
     })
+    if (skipScan && onlyMoreHits(validation)) validation.notes.push(CATALOG_NOTE)
     return { status: 'replayed', trace, validation }
   } catch (error) {
     if (error instanceof Unsupported) return { status: 'unsupported', reason: error.message }
     return { status: 'failed', message: error instanceof Error ? error.message : String(error) }
   }
+}
+
+/**
+ * Why a skip scan can count more buffer hits than its replay: the first
+ * skip scan over a type in a session looks up in the system catalogs how to
+ * step through its values (an operator class's skip support), and Postgres
+ * counts those page accesses as the scan's. Later ones find the answer in
+ * memory. The replay reads only the query's own tables and indexes.
+ */
+export const CATALOG_NOTE =
+  'A session’s first skip scan over a column type also reads system catalog pages, to look up how to step through its values. Postgres counts them as the scan’s buffer hits; the replay doesn’t. Run the query again to compare.'
+
+/** Whether the only checks that failed are buffer hits, with Postgres counting more than the replay. */
+function onlyMoreHits(validation: Validation) {
+  const failed = validation.checks.filter((check) => !check.ok)
+  return failed.length > 0 && failed.every((check) => check.label.endsWith(': buffer hits') && check.postgres > check.replay)
 }
 
 /**

@@ -49,6 +49,20 @@ describe('parseIndexCond', () => {
     ])
   })
 
+  it('reads a list of values (= ANY), and conditions after a column without one (a skip scan)', () => {
+    expect(parseIndexCond(`(t.id = ANY ('{5,1}'::integer[]))`, 't', [column('id')])).toEqual([
+      { column: 0, operator: '= ANY', value: `'{5,1}'::integer[]` },
+    ])
+    const cond = `((t.order_date = ANY (ARRAY['2024-01-01'::date, '2024-02-01'::date])) AND (t.customer_id > 5))`
+    expect(parseIndexCond(cond, 't', orderColumns)).toEqual([
+      { column: 0, operator: '>', value: '5' },
+      { column: 1, operator: '= ANY', value: `ARRAY['2024-01-01'::date, '2024-02-01'::date]` },
+    ])
+    expect(parseIndexCond(`(t.order_date = '2024-01-01'::date)`, 't', orderColumns)).toEqual([
+      { column: 1, operator: '=', value: `'2024-01-01'::date` },
+    ])
+  })
+
   it('says what it can’t replay yet', () => {
     const reason = (cond: string, columns = [column('id')]) => {
       try {
@@ -58,13 +72,13 @@ describe('parseIndexCond', () => {
         return (error as Error).message
       }
     }
-    expect(reason(`(t.id = ANY ('{1,2}'::integer[]))`)).toBe(
-      'Animation isn’t available yet for index conditions with a list of values (= ANY).',
+    expect(reason(`(t.id < ANY ('{1,2}'::integer[]))`)).toBe(
+      `Animation isn’t available yet for the index condition t.id < ANY ('{1,2}'::integer[]).`,
     )
-    expect(reason(`(t.order_date = '2024-01-01'::date)`, [column('customer_id'), column('order_date', 'date')])).toBe(
-      'Animation isn’t available yet for skip scans, where an index column without an = condition comes before a column with a condition.',
+    expect(reason(`(t.id = ALL ('{1,2}'::integer[]))`)).toContain('index condition')
+    expect(reason(`((t.id = ANY ('{1,2}'::integer[])) AND (t.id > 1))`)).toBe(
+      'Animation isn’t available yet for several conditions of the same kind on one index column.',
     )
-    expect(reason(`((t.customer_id > 5) AND (t.order_date = '2024-01-01'::date))`, orderColumns)).toContain('skip scans')
     expect(reason(`((t.id > 5) AND (t.id > 7))`)).toBe(
       'Animation isn’t available yet for several conditions of the same kind on one index column.',
     )
