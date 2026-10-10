@@ -32,6 +32,8 @@ export interface TableName {
 }
 
 export interface PlanNode {
+  /** The node's number, counting from 0 at the root, depth first: how a replay's trace refers to it. */
+  id: number
   /** The node's heading in Postgres's text EXPLAIN, e.g. "Index Scan using orders_pkey on orders". */
   title: string
   /** The node type alone, e.g. "Index Scan". */
@@ -48,6 +50,14 @@ export interface PlanNode {
   totalTimeMs: number
   /** Conditions and counters, e.g. { label: "Index Cond", value: "(orders.id = 4242)" }. */
   details: { label: string; value: string }[]
+  /** The table a scan reads, and the name the query calls it by (its alias); null for other nodes. */
+  relation: { schema: string; name: string; alias: string } | null
+  /** The node's Filter as Postgres deparses it, e.g. "(oi.product_id = 42)"; null if it has none. */
+  filter: string | null
+  /** Rows the Filter rejected, per loop like actualRows; null if the node has no Filter. */
+  rowsRemovedByFilter: number | null
+  /** The values the node outputs, as expressions over its table, e.g. ["order_id", "(quantity * 2)"] (VERBOSE). */
+  output: string[]
   children: PlanNode[]
 }
 
@@ -109,8 +119,10 @@ const HIDDEN_WHEN_ZERO = new Set([
 /** Reads the single row `EXPLAIN (FORMAT JSON)` returns: a one-element array. */
 export function parsePlan(explainJson: unknown): Plan {
   const [explain] = explainJson as JsonExplain[]
+  // Numbers the nodes in the order parseNode reaches them: depth first.
+  let nextId = 0
   return {
-    root: parseNode(explain.Plan),
+    root: parseNode(explain.Plan, () => nextId++),
     ...parsePlanning(explainJson),
     executionMs: explain['Execution Time'] ?? 0,
     raw: explainJson,
@@ -145,14 +157,21 @@ export function tablesInPlan(explainJson: unknown): TableName[] {
   return [...tables.values()]
 }
 
-function parseNode(node: JsonPlanNode): PlanNode {
+function parseNode(node: JsonPlanNode, newId: () => number): PlanNode {
+  const id = newId()
   const details: PlanNode['details'] = []
   for (const field of DETAIL_FIELDS) {
     const value = node[field]
     if (value === undefined || (value === 0 && HIDDEN_WHEN_ZERO.has(field))) continue
     details.push({ label: field, value: Array.isArray(value) ? value.join(', ') : String(value) })
   }
+  const schema = node['Schema']
+  const name = node['Relation Name']
+  const alias = node['Alias']
+  const filter = node['Filter']
+  const removed = node['Rows Removed by Filter']
   return {
+    id,
     title: nodeTitle(node),
     nodeType: node['Node Type'],
     estimatedRows: node['Plan Rows'],
@@ -162,7 +181,14 @@ function parseNode(node: JsonPlanNode): PlanNode {
     sharedRead: node['Shared Read Blocks'],
     totalTimeMs: node['Actual Total Time'],
     details,
-    children: (node.Plans ?? []).map(parseNode),
+    relation:
+      typeof schema === 'string' && typeof name === 'string'
+        ? { schema, name, alias: typeof alias === 'string' ? alias : name }
+        : null,
+    filter: typeof filter === 'string' ? filter : null,
+    rowsRemovedByFilter: typeof filter === 'string' && typeof removed === 'number' ? removed : null,
+    output: Array.isArray(node['Output']) ? (node['Output'] as string[]) : [],
+    children: (node.Plans ?? []).map((child) => parseNode(child, newId)),
   }
 }
 

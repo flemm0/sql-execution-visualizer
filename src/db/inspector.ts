@@ -1,6 +1,7 @@
 import type { PGliteInterface } from '@electric-sql/pglite'
 import type { TableName } from './plan'
 import { query } from './query'
+import { quoteLiteral } from './sql'
 
 /*
  * The inspector: typed wrappers around pg_buffercache (which pages are in
@@ -153,7 +154,7 @@ export interface BtreeItem {
  */
 export async function findRelations(db: PGliteInterface, tables: TableName[]): Promise<Relation[]> {
   if (tables.length === 0) return []
-  const names = tables.map((table) => `(${literal(table.schema)}, ${literal(table.name)})`).join(', ')
+  const names = tables.map((table) => `(${quoteLiteral(table.schema)}, ${quoteLiteral(table.name)})`).join(', ')
   const result = await query<{
     oid: number
     schema: string
@@ -409,9 +410,4 @@ function unique(numbers: number[]) {
 
 function intArray(numbers: number[]) {
   return `ARRAY[${numbers.join(', ')}]::int8[]`
-}
-
-/** A string as a SQL string literal. */
-function literal(text: string) {
-  return `'${text.replaceAll("'", "''")}'`
 }

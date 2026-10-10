@@ -1,5 +1,6 @@
 import type { PGliteInterface } from '@electric-sql/pglite'
 import { query } from './query'
+import { quoteIdentifier } from './sql'
 
 /*
  * PGlite runs Postgres as a single process, so there is no autovacuum. This
@@ -271,8 +272,4 @@ export async function runAutovacuum(db: PGliteInterface): Promise<AutovacuumActi
     })
   }
   return actions
-}
-
-function quoteIdentifier(name: string) {
-  return `"${name.replaceAll('"', '""')}"`
 }

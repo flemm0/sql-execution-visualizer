@@ -33,11 +33,11 @@ The order matters for getting buffer hits and reads exactly right; the measureme
 2. **Empty the cache.** If **Empty cache** is on, evict every page of the query's relations (`pg_buffercache_evict_relation`), then plan again: on an empty cache the planner has to read its index probes again, as it would in a real run. The plan view shows the buffer counts of this last planning, since `EXPLAIN ANALYZE` plans once more and finds everything already cached.
 3. **Snapshot the cache.** Record which pages of the query's relations are cached (`pg_buffercache`), in every fork. The replay decides hit or read from this.
 4. **Execute.** Run `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)`. This gives the real plan tree, estimated vs. actual rows per node, and real buffer hits and reads.
-5. **Get the result.** Run the query itself for the result rows, then snapshot the cache again: this is what the query leaves behind.
+5. **Get the result.** Run the query itself for the result rows, then snapshot the cache again: this is what the query leaves behind (for step 9).
 6. **Inspect.** Read the pages the plan touches: B-tree root-to-leaf paths and leaf pages (`bt_page_items`; posting lists from B-tree deduplication included), and heap pages (`heap_page_items`). Pages are fetched lazily, in batches, and memoized for the run.
-7. **Replay.** Walk the plan tree and emit a trace (below).
+7. **Replay.** Walk the plan tree and emit a trace (below). The statement's result carries the outcome: replayed, with the trace and its validation; unsupported, with the reason; or failed.
 8. **Validate.** Compare the replay with steps 4 and 5 (see Validator).
-9. **Restore the cache.** Inspection reads pages through shared buffers too. Evict each buffer that wasn't in the second snapshot (`pg_buffercache_evict`), so the next run sees exactly the cache this query left behind.
+9. **Restore the cache.** Inspection reads pages through shared buffers too. Evict each buffer that wasn't in the second snapshot (`pg_buffercache_evict`), so the next run sees exactly the cache this query left behind. (Not wired in yet: a Seq Scan replay reads only pages the query itself read. It comes with the Index Scan replay, which reads B-tree pages with pageinspect.)
 
 Other statements (DDL, DML, `ANALYZE`, `VACUUM`) just run. After each run (one statement or Run all), the autovacuum simulator checks thresholds, then the schema browser and page views refresh.
 
@@ -62,37 +62,40 @@ Other statements (DDL, DML, `ANALYZE`, `VACUUM`) just run. After each run (one s
 Not yet: decoding index keys. The plan is to decode them from raw bytes for simple fixed-width types (int, bigint, date, timestamp), and for other types read the key from the heap row the index entry points to, evaluating the index's column expressions in SQL.
 
 ### Replay engine (main thread)
-One replayer per plan node type. Each mirrors the executor's demand-pull iterator model (each node pulls rows from its children one at a time), written as TypeScript generators so v2 joins compose naturally. Replayers emit trace events and pass rows to their parent.
+`src/replay/`: `replay.ts` picks the replayer, `buffers.ts` decides hit or read, `seqScan.ts` replays a Seq Scan. One replayer per plan node type. Each mirrors the executor's demand-pull iterator model (each node pulls rows from its children one at a time), written as TypeScript generators so v2 joins compose naturally. Replayers emit trace events and pass rows to their parent.
 
 Buffer accesses follow the executor: a page access is a hit if the page was in the snapshot (step 3) or was already read earlier in this run, and a read otherwise. An index scan keeps its heap page pinned while consecutive index entries point into it, and only counts an access when it moves to another page. Index scans never read the B-tree metapage during execution (Postgres keeps it in memory after planning). Planning's own reads are not animated; the plan view reports them as a note.
 
 Replayers never re-implement SQL semantics. Whether a row passes a `Filter` or `Index Cond` is asked of Postgres with a helper query built from the plan's deparsed expressions, e.g. `SELECT ctid FROM orders WHERE <filter>`, which returns the set of passing `ctid`s. Plans that reference parameters, subplans, or InitPlans are out of v1 scope.
 
-Node types by release: see [ROADMAP.md](ROADMAP.md). A node without a replayer still shows its plan and result, with "animation not yet supported for X".
+Node types by release: see [ROADMAP.md](ROADMAP.md). A node without a replayer still shows its plan and result, with "Animation isn’t available yet for X." For now a query replays only when every node in its plan has a replayer; so far that's a lone Seq Scan.
+
+**Seq Scan** (`seqScan.ts`): every page of the table, in order, from page 0 to the last, as one hit or read each. One grouped query asks Postgres how many rows on each page are visible to the query and which of them pass the Filter (`FROM ONLY`, so tables inheriting from it are left out). The matching rows go to the result in page and line pointer order. The trace is per page, not per row ([ADR 0024](decisions/0024-seq-scan-trace-per-page.md)).
 
 ### Trace format
-An ordered list of small, engine-agnostic events. Each has a type, the plan node it belongs to, the objects it touches, and a caption template with parameters. Illustrative types:
+`src/replay/trace.ts`: the relations it refers to (id, name, table or index, size in pages) and an ordered list of small, engine-agnostic events. Each has a type, the plan node it belongs to (`PlanNode.id`, numbered depth first from 0 at the root), and the pages or rows it touches. Events carry no captions: the visualization writes them from the type and fields ([ADR 0024](decisions/0024-seq-scan-trace-per-page.md)).
 
-| Event | Meaning |
-|---|---|
-| `node.start` / `node.finish` | A plan node begins or ends work |
-| `index.visit` | Read an index page at a given level; compare keys |
-| `index.entry` | An index entry matched; it points at a `ctid` |
-| `buffer.hit` / `buffer.read` | Page requested: already cached, or read from disk into a buffer |
-| `heap.tuple` | Examine one row version: visible? passes the filter? |
-| `row.emit` | Node passes a row to its parent (or to the client) |
-| `sort.*`, `limit.stop` | Operator-specific steps |
+| Event | Meaning | Status |
+|---|---|---|
+| `node.start` / `node.finish` | A plan node begins or ends work | built |
+| `buffer.hit` / `buffer.read` | Page requested: already cached, or read from disk into a buffer | built |
+| `heap.page` | A scan went through a heap page: rows visible to the query, and how many passed the filter | built (Seq Scan) |
+| `row.emit` | Node passes a row (its `ctid`) to its parent, or to the result at a given position | built |
+| `index.visit` | Read an index page at a given level; compare keys | planned (Index Scan) |
+| `index.entry` | An index entry matched; it points at a `ctid` | planned (Index Scan) |
+| `heap.tuple` | Examine one row version: visible? passes the filter? | planned (Index Scan) |
+| `sort.*`, `limit.stop` | Operator-specific steps | planned (M3) |
 
 Engine-specific code (Postgres runner, inspector, replayers) sits behind a `DatabaseEngine` interface. The trace, player, and visualization know nothing Postgres-specific beyond vocabulary, so other databases can be added later.
 
 ### Validator (main thread)
-Checks that the replay matches reality:
+`src/replay/validate.ts` checks that the replay matches reality, and lists each check with Postgres's number and the replay's:
 
-- The emitted rows equal the real result (as a multiset, or in order when the query has `ORDER BY`).
-- Per-node actual rows and loops equal `EXPLAIN ANALYZE`.
-- Buffer hits and reads equal `EXPLAIN (BUFFERS)`.
+- For each replayed node: rows emitted equal its actual rows × loops; rows removed by its filter (visible rows minus matching ones) equal `Rows Removed by Filter`; buffer hits and reads, its own and its children's, equal `EXPLAIN (BUFFERS)`.
+- The number of rows sent to the result equals the real result's.
+- The rows sent to the result have the same values, in the same order, as the result rows the results pane shows (up to 1,000). The values are read from Postgres by `ctid`, using the plan's own output expressions. With more rows, the count covers the rest, and a note says so ([ADR 0024](decisions/0024-seq-scan-trace-per-page.md)).
 
-On mismatch the UI shows a warning banner but still plays the animation. Every example query has an automated test asserting a match.
+It also passes on notes for what it can't check, e.g. a table big enough for Postgres to read it through a ring buffer. On mismatch the plan pane opens the list of checks with the failed ones marked (a warning banner over the animation comes with the visualization), and the animation still plays. Every example query has an automated test asserting a match.
 
 ### Player (main thread)
 Holds the trace and the playback position. Supports play/pause, step forward and back, a timeline scrubber, speed control, and "jump to next row / page / plan node".
@@ -137,6 +140,6 @@ The database is stored in the browser's IndexedDB (PGlite data dir `idb://sql-ex
 - **Hosting headers.** GitHub Pages cannot set custom HTTP headers. PGlite is expected not to need any (no `SharedArrayBuffer`); M0 verifies this. Fallback: Cloudflare Pages.
 - **Saving.** Changes are saved when a run ends, not after each statement, so closing the tab in the middle of a run can lose that run's changes ([ADR 0023](decisions/0023-save-once-per-run.md)). `saveWhenAsked` depends on which methods PGlite's worker proxy runs queries with; a PGlite upgrade that adds one would bring back a save per query (slower, not wrong).
 - **Ring buffers.** A Seq Scan of a table larger than a quarter of shared buffers (4,096 pages in PGlite) uses a small ring of buffers, which the replay does not model. No seed table comes close; the validator flags a learner's table that does.
-- **Volatile queries.** Steps 4 and 5 execute the query twice. Queries with `random()`, `now()`, etc. may differ between executions; the validator will flag them.
+- **Volatile queries.** Steps 4 and 5 execute the query twice, and the replay asks Postgres about its rows once more. Queries with `random()`, `now()`, etc. may differ between executions; the validator flags them (`random() < 0.5` is tested).
 - **Autovacuum counters.** PGlite keeps `pg_stat_user_tables` up to date, but only publishes a session's counts when forced or a second after the last flush, and starts them from zero on every page load. The simulator forces a flush before reading, and accepts the reset, as after a crash on a real server ([ADR 0021](decisions/0021-autovacuum-simulator.md)).
 - **Other databases.** MySQL/MariaDB have no maintained browser build. Supporting them later may require a different engine approach; the engine-agnostic trace and visualization keep that option open.

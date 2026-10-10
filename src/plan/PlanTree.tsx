@@ -1,4 +1,6 @@
 import type { Plan, PlanNode } from '../db/plan'
+import type { Replay } from '../replay/replay'
+import { ReplayStatus } from './ReplayStatus'
 
 const integer = new Intl.NumberFormat('en-US')
 const decimal = new Intl.NumberFormat('en-US', { maximumFractionDigits: 3 })
@@ -7,10 +9,11 @@ const decimal = new Intl.NumberFormat('en-US', { maximumFractionDigits: 3 })
  * The plan Postgres used, as a tree: each node with estimated vs. actual
  * rows, the pages it found in shared buffers (hits) or read into them
  * (reads), and its conditions. Children are the nodes it pulls rows from.
- * Below it, what planning and execution took. Planning's buffers (system
- * catalogs, index probes) aren't part of any node's.
+ * Below it, what planning and execution took (planning's buffers, for system
+ * catalogs and index probes, aren't part of any node's), and whether the
+ * replay of the query matches what Postgres reported.
  */
-export function PlanTree({ plan }: { plan: Plan }) {
+export function PlanTree({ plan, replay }: { plan: Plan; replay: Replay | null }) {
   return (
     <div className="p-3 text-xs" data-testid="plan-tree">
       <ul aria-label="Plan nodes">
@@ -21,6 +24,7 @@ export function PlanTree({ plan }: { plan: Plan }) {
         {integer.format(plan.planningRead)}
       </p>
       <p className="font-mono text-fg-muted">Execution {decimal.format(plan.executionMs)} ms</p>
+      {replay && <ReplayStatus replay={replay} />}
     </div>
   )
 }

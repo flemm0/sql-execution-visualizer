@@ -1,7 +1,8 @@
-import { messages, parse, type ParserOptions, type PGliteInterface, type Results } from '@electric-sql/pglite'
+import { messages, parse, type PGliteInterface, type Results } from '@electric-sql/pglite'
+import { replayQuery, type Replay } from '../replay/replay'
 import { evictRelations, findRelations, snapshotCache, type CacheSnapshot, type Relation } from './inspector'
 import { parsePlan, parsePlanning, tablesInPlan, type Plan } from './plan'
-import { query, sendQuery } from './query'
+import { KEEP_TEXT, query, sendQuery } from './query'
 import { commandName, isQuery, splitStatements, statementAt, type Statement } from './statements'
 
 /** The results pane shows at most this many rows of a result; the total is always reported. */
@@ -51,6 +52,8 @@ export interface RowsResult extends ResultBase {
   plan: Plan | null
   /** How the query found the cache; null when plan is. */
   cache: QueryCache | null
+  /** The query replayed step by step and checked against Postgres, or why it couldn't be; null when plan is. */
+  replay: Replay | null
   durationMs: number
 }
 
@@ -78,18 +81,6 @@ export interface ErrorResult extends ResultBase {
 export interface SkippedResult extends ResultBase {
   status: 'skipped'
 }
-
-/**
- * Postgres sends every value as text. PGlite normally turns some of them into
- * JavaScript values (dates into Date objects, which shifts them into the
- * browser's time zone; json into objects). The results pane shows exactly what
- * Postgres sent instead, so every parser is replaced with one that keeps the
- * text. PGlite only has parsers for Postgres's built-in types, and those all
- * have type ids (OIDs) below 16384.
- */
-const KEEP_TEXT: ParserOptions = Object.fromEntries(
-  Array.from({ length: 16384 }, (_, oid) => [oid, (value: string) => value]),
-)
 
 const WRITING_COMMANDS = new Set(['INSERT', 'UPDATE', 'DELETE', 'MERGE', 'COPY'])
 
@@ -140,16 +131,28 @@ export async function runStatement(
   const result = reply.results[reply.results.length - 1]
   if (result.fields.length > 0) {
     const rows = result.rows as (string | null)[][]
+    const shown = rows.slice(0, MAX_DISPLAYED_ROWS)
+    const replay = explained
+      ? await replayQuery(db, {
+          plan: explained.plan,
+          relations: explained.cache.relations,
+          cacheBefore: explained.cache.before,
+          columnCount: result.fields.length,
+          resultRows: shown,
+          totalRows: rows.length,
+        })
+      : null
     return {
       status: 'rows',
       statement,
       command,
       notices,
       columns: result.fields.map((field) => field.name),
-      rows: rows.slice(0, MAX_DISPLAYED_ROWS),
+      rows: shown,
       totalRows: rows.length,
       plan: explained?.plan ?? null,
       cache: explained?.cache ?? null,
+      replay,
       durationMs,
     }
   }

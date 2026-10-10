@@ -76,6 +76,38 @@ describe('details', () => {
   })
 })
 
+describe('plan nodes', () => {
+  it('are numbered depth first, and carry their table, alias, filter and output', async () => {
+    await db.exec('SET enable_hashjoin = off; SET enable_mergejoin = off')
+    const plan = await planFor(
+      `SELECT c.name, p.price * 2 FROM categories c JOIN products p ON p.category_id = c.id WHERE c.id + 0 < 4 AND p.price > 50`,
+    )
+    await db.exec('RESET enable_hashjoin; RESET enable_mergejoin')
+    const nodes: PlanNode[] = []
+    const visit = (node: PlanNode) => {
+      nodes.push(node)
+      node.children.forEach(visit)
+    }
+    visit(plan.root)
+    expect(nodes.map((node) => node.id)).toEqual([...nodes.keys()])
+
+    const categories = nodes.find((node) => node.relation?.name === 'categories')
+    expect(categories?.relation).toEqual({ schema: 'public', name: 'categories', alias: 'c' })
+    expect(categories?.filter).toBe('((c.id + 0) < 4)')
+    // Per loop, as EXPLAIN reports it: here categories may be scanned once per product.
+    const removed = categories?.details.find((detail) => detail.label === 'Rows Removed by Filter')?.value
+    expect(categories?.rowsRemovedByFilter).toBe(Number(removed))
+    expect(categories?.output).toEqual(['c.name', 'c.id'])
+    expect(plan.root.relation).toBeNull()
+    expect(plan.root.filter).toBeNull()
+    expect(plan.root.rowsRemovedByFilter).toBeNull()
+
+    const scan = (await planFor('SELECT * FROM categories WHERE id + 0 < 4')).root
+    expect(scan.loops).toBe(1)
+    expect(scan.rowsRemovedByFilter).toBe(9)
+  })
+})
+
 describe('tablesInPlan', () => {
   async function tablesOf(sql: string) {
     const result = await db.query<{ 'QUERY PLAN': unknown }>(`EXPLAIN (VERBOSE, FORMAT JSON) ${sql}`)
