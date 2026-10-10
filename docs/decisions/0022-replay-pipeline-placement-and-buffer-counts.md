@@ -52,7 +52,7 @@ Things the spike found along the way:
 - **Page data is read in batches and only when needed:** one query per relation and step (for example, per-page row counts for a Seq Scan from `ctid`s), and `heap_page_items` / `bt_page_items` only for pages the player shows in detail ([ARCHITECTURE.md, lazy detail](../ARCHITECTURE.md#player-main-thread)).
 - ~~**PGlite runs with `relaxedDurability`.**~~ Superseded by [ADR 0023](0023-save-once-per-run.md): it lost writes followed by a quick reload; the pages' queries skip the save instead, and the app saves once per run.
 - **A SELECT runs in this order:**
-  1. If "Start with an empty cache" is on, evict every relation in the query with `pg_buffercache_evict_relation`.
+  1. If "Start with an empty cache" is on, evict every relation in the query with `pg_buffercache_evict_relation`. (Built in M2: the app plans once first, to learn which relations the query reads, then evicts them and plans again; see [ARCHITECTURE.md](../ARCHITECTURE.md#running-a-select).)
   2. Plan it with a plain `EXPLAIN` (no ANALYZE), so the planner's own reads happen now.
   3. Snapshot the cache (`pg_buffercache`) for the query's relations.
   4. Run `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)`, then the query for its rows.

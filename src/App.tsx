@@ -55,6 +55,8 @@ type RunState =
 const EDITOR_TEXT_KEY = 'editor-text'
 /** Remembers whether the autovacuum simulator is turned off ('off'); on unless turned off. */
 const AUTOVACUUM_KEY = 'autovacuum'
+/** Remembers whether "Start with an empty cache" is turned off ('off'); on unless turned off. */
+const EMPTY_CACHE_KEY = 'empty-cache'
 
 const STARTING_SQL = `-- Press Cmd/Ctrl+Enter to run the statement under the cursor,
 -- or Shift+Cmd/Ctrl+Enter to run them all.
@@ -76,6 +78,7 @@ export default function App() {
   // and once it's enabled again, the run's changes are saved (ADR 0023).
   const [tidyingUp, setTidyingUp] = useState(false)
   const [autovacuumOn, setAutovacuumOn] = useState(() => readSetting(AUTOVACUUM_KEY) !== 'off')
+  const [emptyCacheOn, setEmptyCacheOn] = useState(() => readSetting(EMPTY_CACHE_KEY) !== 'off')
   const [notices, setNotices] = useState<AutovacuumNotice[]>([])
   const nextNoticeId = useRef(1)
 
@@ -108,7 +111,8 @@ export default function App() {
     setRun({ status: 'running' })
     const db = await getDatabase()
     try {
-      const results = mode === 'all' ? await runAll(db, sql) : await runStatementAt(db, sql, cursor)
+      const options = { emptyCache: emptyCacheOn }
+      const results = mode === 'all' ? await runAll(db, sql, options) : await runStatementAt(db, sql, cursor, options)
       setRun({ status: 'done', results, sql })
       setTidyingUp(true)
     } catch (error) {
@@ -144,6 +148,11 @@ export default function App() {
   function toggleAutovacuum(on: boolean) {
     setAutovacuumOn(on)
     saveSetting(AUTOVACUUM_KEY, on ? 'on' : 'off')
+  }
+
+  function toggleEmptyCache(on: boolean) {
+    setEmptyCacheOn(on)
+    saveSetting(EMPTY_CACHE_KEY, on ? 'on' : 'off')
   }
 
   function showPosition(position: number) {
@@ -235,6 +244,13 @@ export default function App() {
               >
                 <input type="checkbox" checked={autovacuumOn} onChange={(event) => toggleAutovacuum(event.target.checked)} />
                 Autovacuum
+              </label>
+              <label
+                className="flex items-center gap-1.5 text-xs text-fg-muted"
+                title="Before each query, remove its tables' and indexes' pages from shared buffers, so every page it needs is read from disk. Turn off and run again to see buffer hits."
+              >
+                <input type="checkbox" checked={emptyCacheOn} onChange={(event) => toggleEmptyCache(event.target.checked)} />
+                Empty cache
               </label>
             </>
           }

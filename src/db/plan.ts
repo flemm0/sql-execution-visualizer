@@ -6,9 +6,29 @@
 export interface Plan {
   root: PlanNode
   planningMs: number
+  /**
+   * Pages the planner found in shared buffers (hits) or read into them (reads):
+   * system catalogs, an index's metapage, and index probes for ranges near a
+   * column's minimum or maximum. Not part of any node's counts.
+   */
+  planningHit: number
+  planningRead: number
   executionMs: number
   /** The JSON Postgres returned, kept whole for the replay engine (M2). */
   raw: unknown
+}
+
+/** What planning a query took, from `EXPLAIN (BUFFERS, SUMMARY, FORMAT JSON)`. */
+export interface Planning {
+  planningMs: number
+  planningHit: number
+  planningRead: number
+}
+
+/** A table a plan reads, e.g. { schema: "public", name: "orders" }. */
+export interface TableName {
+  schema: string
+  name: string
 }
 
 export interface PlanNode {
@@ -46,8 +66,11 @@ interface JsonPlanNode {
 
 interface JsonExplain {
   Plan: JsonPlanNode
-  'Planning Time': number
-  'Execution Time': number
+  /** Only with SUMMARY, which ANALYZE turns on. */
+  'Planning Time'?: number
+  'Execution Time'?: number
+  /** Only with BUFFERS. */
+  Planning?: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number }
 }
 
 /** Fields shown under a node, in this order, when Postgres includes them. */
@@ -88,10 +111,38 @@ export function parsePlan(explainJson: unknown): Plan {
   const [explain] = explainJson as JsonExplain[]
   return {
     root: parseNode(explain.Plan),
-    planningMs: explain['Planning Time'],
-    executionMs: explain['Execution Time'],
+    ...parsePlanning(explainJson),
+    executionMs: explain['Execution Time'] ?? 0,
     raw: explainJson,
   }
+}
+
+/** Reads planning's time and buffer counts from the row `EXPLAIN (BUFFERS, SUMMARY, FORMAT JSON)` returns. */
+export function parsePlanning(explainJson: unknown): Planning {
+  const [explain] = explainJson as JsonExplain[]
+  return {
+    planningMs: explain['Planning Time'] ?? 0,
+    planningHit: explain.Planning?.['Shared Hit Blocks'] ?? 0,
+    planningRead: explain.Planning?.['Shared Read Blocks'] ?? 0,
+  }
+}
+
+/**
+ * The tables a plan reads, each once, from the row `EXPLAIN (VERBOSE, FORMAT JSON)`
+ * returns (VERBOSE adds each table's schema). Views don't appear: the planner
+ * replaces a view with its query, so the plan reads the tables underneath.
+ */
+export function tablesInPlan(explainJson: unknown): TableName[] {
+  const [explain] = explainJson as JsonExplain[]
+  const tables = new Map<string, TableName>()
+  const visit = (node: JsonPlanNode) => {
+    const name = node['Relation Name']
+    const schema = node['Schema']
+    if (typeof name === 'string' && typeof schema === 'string') tables.set(JSON.stringify([schema, name]), { schema, name })
+    for (const child of node.Plans ?? []) visit(child)
+  }
+  visit(explain.Plan)
+  return [...tables.values()]
 }
 
 function parseNode(node: JsonPlanNode): PlanNode {
