@@ -6,8 +6,7 @@ import { AutovacuumToasts, type AutovacuumNotice } from './autovacuum/Autovacuum
 import { runAutovacuum, type AutovacuumAction } from './db/autovacuum'
 import { loadCatalog, postgresVersion, type DatabaseInfo } from './db/catalog'
 import { connectToDatabase } from './db/client'
-import type { Plan } from './db/plan'
-import { inTransaction, runAll, runStatementAt, type StatementResult } from './db/runner'
+import { inTransaction, runAll, runStatementAt, type RowsResult, type StatementResult } from './db/runner'
 import { SEED_VERSION, readSeedInfo, resetDatabase, type SeedInfo } from './db/seed'
 import { SqlEditor, selectInEditor, type RunMode } from './editor/SqlEditor'
 import { APP_NAME, Header } from './layout/Header'
@@ -177,11 +176,11 @@ export default function App() {
   const overview = state.status === 'ready' ? state.overview : null
   const seedOutdated = overview !== null && overview.seed?.version !== SEED_VERSION
   const canRun = state.status === 'ready' && run.status !== 'running' && !tidyingUp
-  // The plan of the last query in the run, if any.
-  const plan: Plan | null =
+  // The last query in the run that has a plan, if any.
+  const lastQuery: RowsResult | undefined =
     run.status === 'done'
-      ? (run.results.flatMap((result) => (result.status === 'rows' && result.plan ? [result.plan] : [])).at(-1) ?? null)
-      : null
+      ? run.results.filter((result): result is RowsResult => result.status === 'rows' && result.plan !== null).at(-1)
+      : undefined
 
   return (
     <div className="flex h-screen flex-col">
@@ -264,8 +263,8 @@ export default function App() {
             />
           }
           plan={
-            plan ? (
-              <PlanTree plan={plan} />
+            lastQuery?.plan ? (
+              <PlanTree plan={lastQuery.plan} replay={lastQuery.replay} />
             ) : (
               <Placeholder>{planPlaceholder(run)}</Placeholder>
             )
