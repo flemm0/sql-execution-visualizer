@@ -56,6 +56,14 @@ export interface PlanNode {
   filter: string | null
   /** Rows the Filter rejected, per loop like actualRows; null if the node has no Filter. */
   rowsRemovedByFilter: number | null
+  /** The index an index scan reads, e.g. "orders_pkey"; null for other nodes. It lives in the table's schema. */
+  indexName: string | null
+  /** An index scan's Index Cond as Postgres deparses it, e.g. "(orders.id = 4242)"; null if it has none. */
+  indexCond: string | null
+  /** Whether an index scan walks its index from high keys to low (ORDER BY ... DESC, for example). */
+  backward: boolean
+  /** How many times an index scan searched down its index from the root (Postgres 18+); null for other nodes. */
+  indexSearches: number | null
   /** The values the node outputs, as expressions over its table, e.g. ["order_id", "(quantity * 2)"] (VERBOSE). */
   output: string[]
   children: PlanNode[]
@@ -170,6 +178,9 @@ function parseNode(node: JsonPlanNode, newId: () => number): PlanNode {
   const alias = node['Alias']
   const filter = node['Filter']
   const removed = node['Rows Removed by Filter']
+  const indexName = node['Index Name']
+  const indexCond = node['Index Cond']
+  const indexSearches = node['Index Searches']
   return {
     id,
     title: nodeTitle(node),
@@ -187,6 +198,10 @@ function parseNode(node: JsonPlanNode, newId: () => number): PlanNode {
         : null,
     filter: typeof filter === 'string' ? filter : null,
     rowsRemovedByFilter: typeof filter === 'string' && typeof removed === 'number' ? removed : null,
+    indexName: typeof indexName === 'string' ? indexName : null,
+    indexCond: typeof indexCond === 'string' ? indexCond : null,
+    backward: node['Scan Direction'] === 'Backward',
+    indexSearches: typeof indexSearches === 'number' ? indexSearches : null,
     output: Array.isArray(node['Output']) ? (node['Output'] as string[]) : [],
     children: (node.Plans ?? []).map((child) => parseNode(child, newId)),
   }

@@ -1,9 +1,10 @@
 import type { PGlite } from '@electric-sql/pglite'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createDatabase } from './createDatabase'
-import { cachedBlocks, findRelations, snapshotCache } from './inspector'
+import { cachedBlocks, findRelations, readBtreeMeta, snapshotCache } from './inspector'
 import {
   MAX_DISPLAYED_ROWS,
+  replayAndRestore,
   runAll,
   runStatementAt,
   transactionStatus,
@@ -189,6 +190,44 @@ describe('the cache a query starts with', () => {
   })
 })
 
+describe('the cache a query leaves', () => {
+  it('has only the pages the query read: what the replay read is evicted again (example 1)', async () => {
+    const result = expectStatus(await runOne('SELECT * FROM orders WHERE id = 4242', { emptyCache: true }), 'rows')
+    expect(result.replay?.status).toBe('replayed')
+    const relations = result.cache?.relations ?? []
+    const [orders, , pkey] = relations
+    // First: looking up the row and the root below reads pages too.
+    const cached = await snapshotCache(db, relations)
+    const [row] = (await db.query<{ page: number }>(`SELECT (ctid::text::point)[0]::int AS page FROM orders WHERE id = 4242`)).rows
+    const { root } = await readBtreeMeta(db, pkey)
+    expect(cachedBlocks(cached, orders)).toEqual(new Set([row.page]))
+    // The root and one leaf; not the metapage (block 0), which the replay read with pageinspect.
+    const indexPages = cachedBlocks(cached, pkey)
+    expect(indexPages.size).toBe(2)
+    expect(indexPages.has(root)).toBe(true)
+    expect(indexPages.has(0)).toBe(false)
+  })
+
+  it('is put back after a replay that reads pages the query didn’t', async () => {
+    const result = expectStatus(await runOne('SELECT * FROM orders WHERE id = 4242', { emptyCache: true }), 'rows')
+    if (!result.plan || !result.cache) throw new Error('no plan')
+    const left = await snapshotCache(db, result.cache.relations)
+    // Without the walk from before the query ran, the replay walks the index
+    // again, which reads its metapage.
+    const replay = await replayAndRestore(db, {
+      plan: result.plan,
+      relations: result.cache.relations,
+      cacheBefore: result.cache.before,
+      columnCount: result.columns.length,
+      resultRows: result.rows,
+      totalRows: result.totalRows,
+      prepared: null,
+    })
+    expect(replay.status).toBe('replayed')
+    expect(await snapshotCache(db, result.cache.relations)).toEqual(left)
+  })
+})
+
 describe('other statements', () => {
   it('report done, with the number of rows changed by writes', async () => {
     expectStatus(await runOne('CREATE TABLE notes (id int, body text)'), 'done')
@@ -276,6 +315,41 @@ describe('errors inside a transaction block', () => {
     // A query in a transaction block still gets its plan.
     expect(expectStatus(second[1], 'rows').plan?.root.nodeType).toBe('Aggregate')
     expect(await transactionStatus(db)).toBe('T')
+  })
+
+  it('a replay that fails doesn’t fail the visitor’s transaction', async () => {
+    // A filter that fails from its 25th call on: EXPLAIN ANALYZE and the query
+    // call it 12 times each (categories has 12 rows), the replay a 25th time.
+    await db.exec(`
+      CREATE SEQUENCE calls;
+      CREATE FUNCTION fails_late() RETURNS boolean VOLATILE LANGUAGE plpgsql AS $$
+      BEGIN
+        IF nextval('calls') > 24 THEN RAISE EXCEPTION 'called too often'; END IF;
+        RETURN true;
+      END $$;
+    `)
+    const results = await runAll(db, 'BEGIN;\nSELECT * FROM categories WHERE fails_late();\nSELECT count(*) FROM categories;')
+    expect(results.map((result) => result.status)).toEqual(['done', 'rows', 'rows'])
+    expect(expectStatus(results[1], 'rows').replay).toEqual({ status: 'failed', message: 'called too often' })
+    expect(await transactionStatus(db)).toBe('T')
+    await db.exec('ROLLBACK; DROP FUNCTION fails_late; DROP SEQUENCE calls')
+  })
+
+  it('a replay that fails before the query runs doesn’t cost the query its plan, or fail the transaction', async () => {
+    // A condition value that fails only in the replay's own query, which compares index keys with it.
+    await db.exec(`
+      CREATE FUNCTION picky() RETURNS int STABLE LANGUAGE plpgsql AS $$
+      BEGIN
+        IF current_query() LIKE '%AS what%' THEN RAISE EXCEPTION 'not in the replay'; END IF;
+        RETURN 4242;
+      END $$;
+    `)
+    const results = await runAll(db, 'BEGIN;\nSELECT * FROM orders WHERE id = picky();')
+    const query = expectStatus(results[1], 'rows')
+    expect(query.plan?.root.title).toBe('Index Scan using orders_pkey on orders')
+    expect(query.replay).toEqual({ status: 'failed', message: 'not in the replay' })
+    expect(await transactionStatus(db)).toBe('T')
+    await db.exec('ROLLBACK; DROP FUNCTION picky')
   })
 
   it('in a transaction block that already failed, report it as Postgres does', async () => {

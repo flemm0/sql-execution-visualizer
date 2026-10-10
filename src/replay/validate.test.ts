@@ -1,7 +1,7 @@
 import type { PGlite } from '@electric-sql/pglite'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createDatabase } from '../db/createDatabase'
-import { runStatementAt } from '../db/runner'
+import { runStatementAt, type StatementResult } from '../db/runner'
 import { seedDatabase } from '../db/seed'
 import type { Trace, TraceEvent } from './trace'
 import { validate, type ValidationInput } from './validate'
@@ -9,13 +9,25 @@ import { validate, type ValidationInput } from './validate'
 let db: PGlite
 /** A replay of example 11 that passes every check, to tamper with. */
 let good: ValidationInput
+/** The same for an Index Scan with a Filter. */
+let goodIndexScan: ValidationInput
 
 beforeAll(async () => {
   db = await createDatabase()
   await seedDatabase(db)
   const [result] = await runStatementAt(db, 'SELECT * FROM categories WHERE id > 9', 0, { emptyCache: true })
+  good = asInput(result)
+  const [indexScan] = await runStatementAt(db, `SELECT * FROM orders WHERE id BETWEEN 100 AND 200 AND total > 100`, 0, {
+    emptyCache: true,
+  })
+  goodIndexScan = asInput(indexScan)
+}, 120_000)
+afterAll(() => db.close())
+
+/** A run's replay, as the validator's input, with the values it read the same as the result's. */
+function asInput(result: StatementResult): ValidationInput {
   if (result.status !== 'rows' || result.plan === null || result.replay?.status !== 'replayed') throw new Error('no replay')
-  good = {
+  return {
     plan: result.plan,
     trace: result.replay.trace,
     resultRows: result.rows,
@@ -23,13 +35,16 @@ beforeAll(async () => {
     replayedRows: result.rows.map((row) => [...row]),
     notes: [],
   }
-}, 120_000)
-afterAll(() => db.close())
+}
 
 /** The labels of the checks that fail when the trace's events are changed by `change`. */
-function failedWith(change: (events: TraceEvent[]) => TraceEvent[], input: Partial<ValidationInput> = {}) {
-  const trace: Trace = { ...good.trace, events: change([...good.trace.events]) }
-  const validation = validate({ ...good, trace, ...input })
+function failedWith(
+  change: (events: TraceEvent[]) => TraceEvent[],
+  input: Partial<ValidationInput> = {},
+  base: ValidationInput = good,
+) {
+  const trace: Trace = { ...base.trace, events: change([...base.trace.events]) }
+  const validation = validate({ ...base, trace, ...input })
   expect(validation.ok).toBe(false)
   return validation.checks.filter((check) => !check.ok).map((check) => check.label)
 }
@@ -66,6 +81,32 @@ describe('the validator', () => {
     ])
     expect(failedWith((events) => events, { replayedRows: [['99', 'Nope', null], ...rest] })).toEqual([
       'Result: rows with the same values, in the same order',
+    ])
+  })
+
+  it('passes a faithful Index Scan replay', () => {
+    expect(validate(goodIndexScan)).toMatchObject({ ok: true, notes: [] })
+  })
+
+  it('catches a missing search down the index', () => {
+    const dropSearch = (events: TraceEvent[]) => events.filter((event) => event.type !== 'index.search')
+    expect(failedWith(dropSearch, {}, goodIndexScan)).toEqual([
+      'Index Scan using orders_pkey on orders: index searches',
+    ])
+  })
+
+  it('counts a fetched row that fails the Filter as removed by it', () => {
+    // The first row that passed is said to fail, and isn't emitted.
+    const failFirst = (events: TraceEvent[]) => {
+      const first = events.findIndex((event) => event.type === 'heap.tuple' && event.matched)
+      return events
+        .map((event, i) => (i === first ? { ...event, matched: false } : event))
+        .filter((event, i) => !(i === first + 1 && event.type === 'row.emit'))
+    }
+    expect(failedWith(failFirst, {}, goodIndexScan)).toEqual([
+      'Index Scan using orders_pkey on orders: rows',
+      'Index Scan using orders_pkey on orders: rows removed by filter',
+      'Result: rows',
     ])
   })
 
