@@ -138,12 +138,43 @@ export interface BtreeItem {
   /** For a downlink, the child page. */
   childBlock: number | null
   /**
+   * For a high key or downlink, how many of the index's key columns it keeps.
+   * When a page splits, Postgres keeps only as many columns as it needs to
+   * tell the two halves apart ("suffix truncation"); the dropped ones stand for
+   * "minus infinity". Null for an entry, which has them all.
+   */
+  keyColumns: number | null
+  /**
+   * For a high key or downlink, whether it also keeps a heap row as a final
+   * tiebreaker: when one key value spans pages, the row tells them apart.
+   */
+  hasHeapTid: boolean
+  /** Whether some of the key's columns are NULL (bt_page_items doesn't say which). */
+  hasNulls: boolean
+  /**
    * For an entry, the heap rows it points at: usually one; several for a
    * posting list, where B-tree deduplication stores one key for many rows.
    */
   heapTids: Tid[]
   /** Marked dead: the rows it points at are gone, so scans skip it. */
   dead: boolean
+}
+
+/** One column of an index, as the index stores it. */
+export interface IndexColumn {
+  /** The table column it holds; null for an expression, e.g. lower(email). */
+  name: string | null
+  /** Its type's name in pg_type, e.g. "int4", "text", "timestamptz". */
+  type: string
+  /** A key column orders the index; the others are INCLUDE columns, stored on leaf pages only. */
+  isKey: boolean
+  /** The collation it sorts text by, as SQL names it (e.g. "C" or pg_catalog."default"); null for other types. */
+  collation: string | null
+  /** DESC, and NULLS FIRST: key columns sort ascending with NULLs last unless the index says otherwise. */
+  descending: boolean
+  nullsFirst: boolean
+  /** Whether it sorts with its type's usual operators, rather than another operator class (e.g. text_pattern_ops). */
+  defaultOrder: boolean
 }
 
 /**
@@ -261,6 +292,42 @@ export async function restoreCache(
   return result.rows[0].evicted
 }
 
+/** Reads an index's columns, in order: its key columns, then its INCLUDE columns. */
+export async function readIndexColumns(db: PGliteInterface, index: Relation): Promise<IndexColumn[]> {
+  // indkey, indcollation, indoption and indclass are vectors that count from 0;
+  // the last three have entries for key columns only.
+  const result = await query<{
+    name: string | null
+    type: string
+    is_key: boolean
+    collation: string | null
+    option: number | null
+    default_order: boolean | null
+  }>(db, `
+    SELECT CASE WHEN i.indkey[a.attnum - 1] = 0 THEN NULL ELSE ta.attname::text END AS name,
+      t.typname::text AS type, a.attnum <= i.indnkeyatts AS is_key,
+      CASE WHEN i.indcollation[a.attnum - 1] <> 0 THEN i.indcollation[a.attnum - 1]::regcollation::text END AS collation,
+      i.indoption[a.attnum - 1]::int AS option, oc.opcdefault AS default_order
+    FROM pg_index i
+    JOIN pg_attribute a ON a.attrelid = i.indexrelid AND a.attnum > 0
+    JOIN pg_type t ON t.oid = a.atttypid
+    LEFT JOIN pg_attribute ta ON ta.attrelid = i.indrelid AND ta.attnum = i.indkey[a.attnum - 1]
+    LEFT JOIN pg_opclass oc ON oc.oid = i.indclass[a.attnum - 1]
+    WHERE i.indexrelid = ${index.oid}
+    ORDER BY a.attnum
+  `)
+  return result.rows.map((row) => ({
+    name: row.name,
+    type: row.type,
+    isKey: row.is_key,
+    collation: row.collation,
+    // Bits of indoption (pg_index.h): 1 for DESC, 2 for NULLS FIRST.
+    descending: ((row.option ?? 0) & 1) !== 0,
+    nullsFirst: ((row.option ?? 0) & 2) !== 0,
+    defaultOrder: row.default_order ?? true,
+  }))
+}
+
 /** Reads heap pages of a table with heap_page_items, in the order asked (a page asked for twice is read once). */
 export async function readHeapPages(db: PGliteInterface, table: Relation, blocks: number[]): Promise<HeapPage[]> {
   if (blocks.length === 0) return []
@@ -324,6 +391,10 @@ const BTP_ROOT = 2
 const BTP_DELETED = 4
 const BTP_HALF_DEAD = 16
 
+// The parts of a high key's or downlink's line pointer number (nbtree.h).
+const BT_OFFSET_MASK = 0x0fff
+const BT_PIVOT_HEAP_TID_ATTR = 0x1000
+
 /** Reads B-tree pages with bt_page_stats and bt_page_items, in the order asked (a page asked for twice is read once). */
 export async function readBtreePages(db: PGliteInterface, index: Relation, blocks: number[]): Promise<BtreePage[]> {
   if (blocks.length === 0) return []
@@ -339,9 +410,10 @@ export async function readBtreePages(db: PGliteInterface, index: Relation, block
     ctid: string
     data: string
     dead: boolean | null
+    nulls: boolean
     heap_tids: (string | null)[]
   }>(db, `
-    SELECT p.block::int AS block, i.itemoffset, i.ctid::text, i.data, i.dead,
+    SELECT p.block::int AS block, i.itemoffset, i.ctid::text, i.data, i.dead, i.nulls,
       -- A posting list has its rows in tids; a plain entry has its one row in htid.
       -- As json, since query() decodes json but not arrays.
       to_json(coalesce(i.tids, ARRAY[i.htid])::text[]) AS heap_tids
@@ -369,12 +441,20 @@ export async function readBtreePages(db: PGliteInterface, index: Relation, block
     const page = pages.get(row.block) as BtreePage
     // Every page but the rightmost on its level starts with its high key.
     const role = row.itemoffset === 1 && page.next !== null ? 'highKey' : page.isLeaf ? 'entry' : 'downlink'
+    // A downlink keeps its child's page number where an entry keeps a heap row's.
+    // A high key or downlink keeps its number of key columns where an entry
+    // keeps the row's line pointer number, with a flag bit for a heap row
+    // tiebreaker (nbtree.h: BT_OFFSET_MASK, BT_PIVOT_HEAP_TID_ATTR).
+    const tid = parseTid(row.ctid)
+    const isPivot = role !== 'entry'
     page.items.push({
       offset: row.itemoffset,
       role,
       keyBytes: row.data,
-      // A downlink keeps its child's page number where an entry keeps a heap row's.
-      childBlock: role === 'downlink' ? parseTid(row.ctid).block : null,
+      childBlock: role === 'downlink' ? tid.block : null,
+      keyColumns: isPivot ? tid.offset & BT_OFFSET_MASK : null,
+      hasHeapTid: isPivot && (tid.offset & BT_PIVOT_HEAP_TID_ATTR) !== 0,
+      hasNulls: row.nulls,
       heapTids: role === 'entry' ? row.heap_tids.flatMap((tid) => (tid === null ? [] : [parseTid(tid)])) : [],
       dead: row.dead === true,
     })

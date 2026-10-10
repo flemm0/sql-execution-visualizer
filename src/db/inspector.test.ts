@@ -9,6 +9,7 @@ import {
   readBtreeMeta,
   readBtreePages,
   readHeapPages,
+  readIndexColumns,
   restoreCache,
   snapshotCache,
   type Relation,
@@ -237,6 +238,63 @@ describe('B-tree pages', () => {
     expect(entries.some((item) => item.heapTids.length > 1)).toBe(true)
     const pointedAt = entries.flatMap((item) => item.heapTids.map((heap) => `(${heap.block},${heap.offset})`))
     expect(pointedAt.sort()).toEqual((await ctids('SELECT ctid FROM repeats')).sort())
+  })
+})
+
+describe('pivot keys: high keys and downlinks', () => {
+  it('keep only the key columns needed to tell pages apart, and a heap row when one key spans pages', async () => {
+    await db.exec(`
+      CREATE TABLE pivots (a int, b int, c int);
+      INSERT INTO pivots SELECT n, n % 10, 7 FROM generate_series(1, 3000) AS n;
+      CREATE INDEX pivots_a_b_idx ON pivots (a, b);
+      CREATE INDEX pivots_c_idx ON pivots (c) WITH (deduplicate_items = off);
+    `)
+    const ab = await relation('pivots_a_b_idx')
+    const [abRoot] = await readBtreePages(db, ab, [(await readBtreeMeta(db, ab)).root])
+    const [minusInfinity, ...downlinks] = abRoot.items
+    expect(minusInfinity).toMatchObject({ keyColumns: 0, keyBytes: '', hasHeapTid: false })
+    // Values of a are unique, so a is enough to tell two leaves apart: b is dropped.
+    expect(downlinks.every((item) => item.keyColumns === 1 && !item.hasHeapTid)).toBe(true)
+
+    // Every entry of pivots_c_idx has c = 7, so only the heap row tells pages apart.
+    const c = await relation('pivots_c_idx')
+    const [cRoot] = await readBtreePages(db, c, [(await readBtreeMeta(db, c)).root])
+    expect(cRoot.items.slice(1).every((item) => item.keyColumns === 1 && item.hasHeapTid)).toBe(true)
+    const [leaf] = await readBtreePages(db, c, [cRoot.items[1].childBlock as number])
+    expect(leaf.items[0]).toMatchObject({ role: 'highKey', keyColumns: 1, hasHeapTid: true })
+    expect(leaf.items[1]).toMatchObject({ role: 'entry', keyColumns: null, hasHeapTid: false, hasNulls: false })
+  })
+
+  it('say when an entry’s key has NULLs', async () => {
+    await db.exec(`
+      CREATE TABLE maybe (v int);
+      INSERT INTO maybe VALUES (1), (NULL);
+      CREATE INDEX maybe_v_idx ON maybe (v);
+    `)
+    const index = await relation('maybe_v_idx')
+    const [root] = await readBtreePages(db, index, [(await readBtreeMeta(db, index)).root])
+    expect(root.items.map((item) => [item.hasNulls, item.keyBytes])).toEqual([
+      [false, '01 00 00 00 00 00 00 00'],
+      [true, ''],
+    ])
+  })
+})
+
+describe('readIndexColumns', () => {
+  it('reads each column’s table column, type, collation and order, then the INCLUDE columns', async () => {
+    await db.exec(`
+      CREATE TABLE people (id int, name text, email text, born date);
+      CREATE INDEX people_idx ON people (name COLLATE "C" DESC, lower(email) text_pattern_ops, born NULLS FIRST) INCLUDE (id);
+    `)
+    expect(await readIndexColumns(db, await relation('people_idx'))).toEqual([
+      { name: 'name', type: 'text', isKey: true, collation: '"C"', descending: true, nullsFirst: true, defaultOrder: true },
+      { name: null, type: 'text', isKey: true, collation: '"default"', descending: false, nullsFirst: false, defaultOrder: false },
+      { name: 'born', type: 'date', isKey: true, collation: null, descending: false, nullsFirst: true, defaultOrder: true },
+      { name: 'id', type: 'int4', isKey: false, collation: null, descending: false, nullsFirst: false, defaultOrder: true },
+    ])
+    expect(await readIndexColumns(db, await relation('orders_pkey'))).toEqual([
+      { name: 'id', type: 'int4', isKey: true, collation: null, descending: false, nullsFirst: false, defaultOrder: true },
+    ])
   })
 })
 

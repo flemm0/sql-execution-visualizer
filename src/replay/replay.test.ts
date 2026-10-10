@@ -4,7 +4,7 @@ import { createDatabase } from '../db/createDatabase'
 import { runStatementAt, type RowsResult, type RunOptions } from '../db/runner'
 import { seedDatabase } from '../db/seed'
 import type { Replay } from './replay'
-import type { Trace, TraceEvent } from './trace'
+import type { RowRef, Trace, TraceEvent } from './trace'
 
 let db: PGlite
 
@@ -170,6 +170,293 @@ describe('replaying a Seq Scan', () => {
   })
 })
 
+/** A table's ctids for a query's rows, e.g. "(12,3)", in the query's order. */
+async function ctidsOf(sql: string) {
+  const result = await db.query<{ ctid: string }>(sql)
+  return result.rows.map((row) => row.ctid)
+}
+
+function text(row: { block: number; offset: number }) {
+  return `(${row.block},${row.offset})`
+}
+
+/** An index's B-tree root page and its level, from pageinspect. */
+async function btree(index: string) {
+  const meta = await db.query<{ root: number; level: number }>(`SELECT root::int, level::int FROM bt_metap('${index}')`)
+  return meta.rows[0]
+}
+
+/** Runs `body` with some of the planner's choices turned off (e.g. "enable_bitmapscan"), so it picks the plan a test is about. */
+async function without<T>(settings: string[], body: () => Promise<T>): Promise<T> {
+  await db.exec(settings.map((setting) => `SET ${setting} = off;`).join(' '))
+  try {
+    return await body()
+  } finally {
+    await db.exec(settings.map((setting) => `RESET ${setting};`).join(' '))
+  }
+}
+
+describe('replaying an Index Scan', () => {
+  it('example 1: searches from the root to one leaf, and fetches one heap row', async () => {
+    const sql = 'SELECT * FROM orders WHERE id = 4242'
+    const { result, trace, validation } = await replayed(sql)
+    const [orders, , pkey] = trace.relations
+    const { root } = await btree('orders_pkey')
+    const [ctid] = await ctidsOf(`SELECT ctid::text FROM orders WHERE id = 4242`)
+    const [leaf] = ofType(trace, 'index.visit').slice(1)
+
+    expect(result.plan?.root.title).toBe('Index Scan using orders_pkey on orders')
+    expect(trace.events.map((event) => event.type)).toEqual([
+      'node.start',
+      'index.search',
+      'buffer.read', // the root
+      'index.visit',
+      'buffer.read', // one leaf
+      'index.visit',
+      'index.entry',
+      'buffer.read', // one heap page
+      'heap.tuple',
+      'row.emit',
+      'node.finish',
+    ])
+    expect(ofType(trace, 'index.visit').map((event) => [event.page.relation, event.page.block, event.level])).toEqual([
+      [pkey.id, root, 1],
+      [pkey.id, leaf.page.block, 0],
+    ])
+    // The root's downlink points at the leaf.
+    const [downlink] = await db.query<{ ctid: string }>(
+      `SELECT ctid::text FROM bt_page_items('orders_pkey', ${root}) WHERE itemoffset = ${ofType(trace, 'index.visit')[0].downlink}`,
+    ).then((found) => found.rows)
+    expect(downlink.ctid).toMatch(new RegExp(`^\\(${leaf.page.block},`))
+    const [entry] = ofType(trace, 'index.entry')
+    expect(entry).toMatchObject({ key: ['4242'], page: { relation: pkey.id, block: leaf.page.block } })
+    expect(text(entry.row)).toBe(ctid)
+    expect(ofType(trace, 'heap.tuple')[0]).toEqual({ type: 'heap.tuple', node: 0, row: entry.row, visible: entry.row, matched: true })
+    expect(ofType(trace, 'buffer.read')[2].page).toEqual({ relation: orders.id, block: entry.row.block })
+
+    expect(validation.checks.map((check) => check.label)).toEqual([
+      'Index Scan using orders_pkey on orders: rows',
+      'Index Scan using orders_pkey on orders: index searches',
+      'Index Scan using orders_pkey on orders: buffer hits',
+      'Index Scan using orders_pkey on orders: buffer reads',
+      'Result: rows',
+      'Result: rows with the same values, in the same order',
+    ])
+  })
+
+  it('example 4: walks right along 4 leaves, and reads each of 13 heap pages once, in index order', async () => {
+    const { trace } = await replayed('SELECT * FROM orders WHERE id BETWEEN 1000 AND 2000')
+    const pkey = trace.relations[2]
+    const reads = ofType(trace, 'buffer.read')
+    expect(reads).toHaveLength(18)
+    expect(ofType(trace, 'buffer.hit')).toEqual([])
+    const indexReads = reads.filter((event) => event.page.relation === pkey.id)
+    expect(indexReads).toHaveLength(5)
+
+    // Each leaf after the first is the right neighbor of the one before.
+    const leaves = ofType(trace, 'index.visit').filter((event) => event.level === 0).map((event) => event.page.block)
+    expect(leaves).toHaveLength(4)
+    for (let i = 1; i < leaves.length; i++) {
+      const stats = await db.query<{ next: number }>(`SELECT btpo_next::int AS next FROM bt_page_stats('orders_pkey', ${leaves[i - 1]})`)
+      expect(stats.rows[0].next).toBe(leaves[i])
+    }
+
+    const emitted = ofType(trace, 'row.emit')
+    expect(emitted.map((event) => text(event.row))).toEqual(
+      await ctidsOf('SELECT ctid::text FROM orders WHERE id BETWEEN 1000 AND 2000 ORDER BY id'),
+    )
+    expect(ofType(trace, 'index.entry').map((event) => event.key[0])).toEqual(
+      Array.from({ length: 1001 }, (_, i) => String(1000 + i)),
+    )
+  })
+
+  it('with a warm cache, every page is a hit', async () => {
+    await run('SELECT * FROM orders WHERE id = 4242', {})
+    const { trace } = await replayed('SELECT * FROM orders WHERE id = 4242', {})
+    expect(ofType(trace, 'buffer.read')).toEqual([])
+    expect(ofType(trace, 'buffer.hit')).toHaveLength(3)
+  })
+
+  it('goes down every level of a 3-level index (order_items_pkey)', async () => {
+    const { trace } = await replayed('SELECT * FROM order_items WHERE order_id = 777 AND line_no > 1')
+    expect(ofType(trace, 'index.visit').map((event) => event.level)).toEqual([2, 1, 0])
+    expect(ofType(trace, 'index.entry').every((event) => event.key[0] === '777' && Number(event.key[1]) > 1)).toBe(true)
+  })
+
+  it('fetches rows that fail the Filter too, and counts them as removed', async () => {
+    const { trace, validation } = await replayed(
+      `SELECT * FROM orders WHERE id BETWEEN 49000 AND 49500 AND status = 'pending'`,
+    )
+    const tuples = ofType(trace, 'heap.tuple')
+    expect(tuples).toHaveLength(501)
+    const passed = tuples.filter((event) => event.matched).length
+    expect(passed).toBeGreaterThan(0)
+    expect(passed).toBeLessThan(501)
+    expect(ofType(trace, 'row.emit')).toHaveLength(passed)
+    expect(validation.checks.find((check) => check.label.endsWith('rows removed by filter'))).toMatchObject({
+      replay: 501 - passed,
+      ok: true,
+    })
+  })
+
+  it('stops at a high key past the range, and goes right of a downlink equal to the start key', async () => {
+    // The root's second downlink: the first key of the second leaf (a 4-byte integer).
+    const { root } = await btree('orders_pkey')
+    const second = await db.query<{ data: string }>(`SELECT data FROM bt_page_items('orders_pkey', ${root}) WHERE itemoffset = 2`)
+    const key = parseInt(second.rows[0].data.split(' ').slice(0, 4).reverse().join(''), 16)
+
+    // Every entry of the first leaf matches; its high key says the next one can't.
+    const first = await replayed(`SELECT * FROM orders WHERE id BETWEEN 1 AND ${key - 1}`)
+    expect(ofType(first.trace, 'index.visit').map((event) => event.level)).toEqual([1, 0])
+    expect(ofType(first.trace, 'row.emit')).toHaveLength(key - 1)
+    // Starting at the second leaf's first key, the search goes straight to the second leaf.
+    const next = await replayed(`SELECT * FROM orders WHERE id BETWEEN ${key} AND ${key + 5}`)
+    const visits = ofType(next.trace, 'index.visit')
+    expect(visits.map((event) => event.level)).toEqual([1, 0])
+    expect(visits[0].downlink).toBe(2)
+  })
+
+  it('finds nothing past the last key, and nothing in a contradiction, as Postgres does', async () => {
+    const past = await replayed('SELECT * FROM orders WHERE id > 50000')
+    expect(ofType(past.trace, 'row.emit')).toEqual([])
+    const none = await replayed('SELECT * FROM orders WHERE id > 3000 AND id < 2000')
+    expect(ofType(none.trace, 'row.emit')).toEqual([])
+  })
+
+  it('walks the whole index for its order when there is no condition', async () => {
+    const { trace } = await replayed('SELECT * FROM products ORDER BY id')
+    expect(ofType(trace, 'row.emit')).toHaveLength(1000)
+    expect(ofType(trace, 'index.visit').filter((event) => event.level === 0)).toHaveLength(3)
+  })
+
+  it('compares text keys with the column’s collation, in a multi-column index', async () => {
+    const { trace } = await without(['enable_bitmapscan'], () =>
+      replayed(`SELECT * FROM customers WHERE last_name = 'Smith' AND first_name >= 'K'`),
+    )
+    const keys = ofType(trace, 'index.entry').map((event) => event.key)
+    expect(keys.length).toBeGreaterThan(0)
+    expect(keys.every(([last, first]) => last === 'Smith' && (first as string) >= 'K')).toBe(true)
+
+    await db.exec(`
+      CREATE TABLE words (word text COLLATE "unicode", n int);
+      INSERT INTO words SELECT w, n FROM unnest(ARRAY['apple', 'Banana', 'cherry', 'Date', 'éclair']) AS w, generate_series(1, 300) AS n;
+      CREATE INDEX words_word_idx ON words (word);
+      ANALYZE words;
+    `)
+    // In the database's own collation, "C", uppercase sorts before lowercase and é after every
+    // ASCII letter. In "unicode", the order is apple, Banana, cherry, Date, éclair.
+    const words = await without(['enable_seqscan', 'enable_bitmapscan'], () =>
+      replayed(`SELECT * FROM words WHERE word > 'Date' AND word < 'f'`),
+    )
+    await db.exec('DROP TABLE words')
+    expect(new Set(ofType(words.trace, 'index.entry').map((event) => event.key[0]))).toEqual(new Set(['éclair']))
+  })
+
+  it('reads keys of other types: bigint, timestamp, timestamptz, date, varchar, boolean', async () => {
+    await db.exec(`
+      CREATE TABLE typed (big bigint, at timestamp, at_tz timestamptz, day date, code varchar(20), small int2, flag bool);
+      INSERT INTO typed SELECT n * 10000000000, TIMESTAMP '2024-01-02 03:04:05.678' + n * INTERVAL '1 hour 1 second',
+        TIMESTAMPTZ '1999-12-31 23:00:00.000001+02' + n * INTERVAL '1 day', DATE '1999-12-25' + n, 'v' || n, n % 300, n % 2 = 0
+      FROM generate_series(1, 3000) AS n;
+      CREATE INDEX ON typed (big); CREATE INDEX ON typed (at); CREATE INDEX ON typed (at_tz); CREATE INDEX ON typed (day);
+      CREATE INDEX ON typed (code); CREATE INDEX ON typed (small, flag);
+      ANALYZE typed;
+    `)
+    const queries = [
+      'SELECT * FROM typed WHERE big BETWEEN 70000000000 AND 90000000000',
+      `SELECT * FROM typed WHERE at > '2024-04-01' AND at < '2024-04-03'`,
+      `SELECT * FROM typed WHERE at_tz < '2000-01-05'`,
+      `SELECT * FROM typed WHERE day = '2000-01-01'`,
+      `SELECT * FROM typed WHERE code = 'v1234'`,
+      'SELECT * FROM typed WHERE small = 8 AND flag',
+    ]
+    for (const sql of queries) {
+      const { result } = await without(['enable_bitmapscan'], () => replayed(sql))
+      expect(result.plan?.root.nodeType, sql).toBe('Index Scan')
+      expect(result.totalRows, sql).toBeGreaterThan(0)
+    }
+    await db.exec('DROP TABLE typed')
+  })
+
+  it('handles one key on many leaf pages, where downlinks keep a heap row to tell pages apart', async () => {
+    await db.exec(`
+      CREATE TABLE repeated (v int, n int) WITH (autovacuum_enabled = off);
+      INSERT INTO repeated SELECT v, n FROM unnest(ARRAY[7, 8, 9]) AS v, generate_series(1, 2000) AS n;
+      CREATE INDEX repeated_v_idx ON repeated (v) WITH (deduplicate_items = off);
+      ANALYZE repeated;
+    `)
+    const { result } = await replayed('SELECT * FROM repeated WHERE v = 8')
+    expect(result.totalRows).toBe(2000)
+    // > starts after every 7, not at the first page of 7s.
+    const after = await replayed('SELECT * FROM repeated WHERE v > 7 AND v < 9')
+    expect(ofType(after.trace, 'index.entry')[0].key).toEqual(['8'])
+    await db.exec('DROP TABLE repeated')
+  })
+
+  it('follows a row updated in place (HOT) to its new version, and skips a deleted row’s', async () => {
+    await db.exec(`
+      CREATE TABLE stock (id int PRIMARY KEY, count int) WITH (fillfactor = 50, autovacuum_enabled = off);
+      INSERT INTO stock SELECT n, 0 FROM generate_series(1, 500) AS n;
+      UPDATE stock SET count = 1 WHERE id BETWEEN 10 AND 12;
+      DELETE FROM stock WHERE id = 20;
+    `)
+    const { trace } = await without(['enable_bitmapscan'], () => replayed('SELECT * FROM stock WHERE id BETWEEN 8 AND 22'))
+    const tuples = ofType(trace, 'heap.tuple')
+    expect(tuples).toHaveLength(15)
+    const moved = tuples.filter((event) => event.visible !== null && text(event.visible) !== text(event.row))
+    expect(moved).toHaveLength(3)
+    expect(tuples.filter((event) => event.visible === null)).toHaveLength(1)
+    expect(ofType(trace, 'row.emit').map((event) => text(event.row))).toEqual(
+      await ctidsOf('SELECT ctid::text FROM stock WHERE id BETWEEN 8 AND 22 ORDER BY id'),
+    )
+
+    // Those versions were tidied up ("pruned") by the first scan after the
+    // update, so the entry's line pointer redirects to the new version. In the
+    // updating transaction, nothing is pruned yet: the scan follows the chain
+    // from the old version to the new.
+    await db.exec('BEGIN; UPDATE stock SET count = 2 WHERE id = 30')
+    const chained = await without(['enable_bitmapscan'], () => replayed('SELECT * FROM stock WHERE id = 30'))
+    await db.exec('ROLLBACK')
+    const [tuple] = ofType(chained.trace, 'heap.tuple')
+    expect(tuple.visible).not.toBeNull()
+    expect(text(tuple.visible as RowRef)).not.toBe(text(tuple.row))
+    await db.exec('DROP TABLE stock')
+  })
+
+  it('replays the first scan after a delete, which marks the deleted rows’ entries dead; the next skips them', async () => {
+    await db.exec(`
+      CREATE TABLE tickets (id int PRIMARY KEY, note text) WITH (autovacuum_enabled = off);
+      INSERT INTO tickets SELECT n, 'ticket ' || n FROM generate_series(1, 2000) AS n;
+      DELETE FROM tickets WHERE id BETWEEN 100 AND 104;
+    `)
+    const sql = 'SELECT * FROM tickets WHERE id BETWEEN 90 AND 110'
+    const first = await without(['enable_bitmapscan'], () => replayed(sql))
+    expect(ofType(first.trace, 'heap.tuple').filter((event) => event.visible === null)).toHaveLength(5)
+    const [marked] = ofType(first.trace, 'index.markDead')
+    expect(marked.offsets).toHaveLength(5)
+    // Marking them dead takes another look at the leaf page, after its rows were fetched.
+    const types = first.trace.events.map((event) => event.type)
+    expect(types.slice(types.indexOf('index.markDead') - 1)).toEqual(['buffer.hit', 'index.markDead', 'node.finish'])
+
+    const second = await without(['enable_bitmapscan'], () => replayed(sql))
+    expect(ofType(second.trace, 'heap.tuple')).toHaveLength(16)
+    expect(ofType(second.trace, 'index.markDead')).toEqual([])
+    await db.exec('DROP TABLE tickets')
+  })
+
+  it('inside a transaction block, sees the visitor’s own uncommitted changes and leaves the transaction usable', async () => {
+    await db.exec('BEGIN; DELETE FROM order_items WHERE order_id = 4242; DELETE FROM orders WHERE id = 4242')
+    const { result, trace } = await replayed('SELECT * FROM orders WHERE id BETWEEN 4240 AND 4244')
+    expect(result.totalRows).toBe(4)
+    // Deleted, but not yet committed: not visible, and not dead for everyone, so not marked.
+    expect(ofType(trace, 'heap.tuple').filter((event) => event.visible === null)).toHaveLength(1)
+    expect(ofType(trace, 'index.markDead')).toEqual([])
+    await db.exec('ROLLBACK')
+    const { result: after } = await replayed('SELECT * FROM orders WHERE id BETWEEN 4240 AND 4244')
+    expect(after.totalRows).toBe(5)
+  })
+})
+
 describe('a replay that can’t match', () => {
   it('a volatile filter picks other rows each time, and the validator says so', async () => {
     // random() is evaluated anew by EXPLAIN ANALYZE, the query, and the replay's own query.
@@ -188,8 +475,21 @@ describe('a query the replay engine can’t replay yet', () => {
   }
 
   it('says which node type isn’t supported', async () => {
-    expect(await reason('SELECT * FROM orders WHERE id = 4242')).toBe('Animation isn’t available yet for Index Scan.')
     expect(await reason('SELECT count(*) FROM categories')).toBe('Animation isn’t available yet for Aggregate.')
+  })
+
+  it('says which kind of index scan isn’t supported', async () => {
+    expect(await reason(`SELECT * FROM orders WHERE id = ANY ('{5,77,9000}')`)).toBe(
+      'Animation isn’t available yet for index conditions with a list of values (= ANY).',
+    )
+    await without(['enable_seqscan', 'enable_bitmapscan'], async () => {
+      expect(await reason(`SELECT * FROM customers WHERE first_name = 'Mary'`)).toBe(
+        'Animation isn’t available yet for skip scans, where an index column without an = condition comes before a column with a condition.',
+      )
+      expect(await reason('SELECT * FROM orders WHERE id < 100 ORDER BY id DESC')).toBe(
+        'Animation isn’t available yet for backward index scans.',
+      )
+    })
   })
 
   it('says a temporary table can’t be animated', async () => {

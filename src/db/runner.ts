@@ -1,6 +1,13 @@
 import { messages, parse, type PGliteInterface, type Results } from '@electric-sql/pglite'
-import { replayQuery, type Replay } from '../replay/replay'
-import { evictRelations, findRelations, snapshotCache, type CacheSnapshot, type Relation } from './inspector'
+import { prepareReplay, replayQuery, type Prepared, type Replay, type ReplayInput } from '../replay/replay'
+import {
+  evictRelations,
+  findRelations,
+  restoreCache,
+  snapshotCache,
+  type CacheSnapshot,
+  type Relation,
+} from './inspector'
 import { parsePlan, parsePlanning, tablesInPlan, type Plan } from './plan'
 import { KEEP_TEXT, query, sendQuery } from './query'
 import { commandName, isQuery, splitStatements, statementAt, type Statement } from './statements'
@@ -28,6 +35,14 @@ export interface QueryCache {
    * query's first access to one of these pages as a hit, and to any other page as a read.
    */
   before: CacheSnapshot
+}
+
+/** What explainQuery found out about a query before running it. */
+interface Explained {
+  plan: Plan
+  cache: QueryCache
+  /** What the replay read before the query ran (see prepareReplay). */
+  prepared: Prepared | null
 }
 
 /** What happened when one statement ran. */
@@ -133,13 +148,14 @@ export async function runStatement(
     const rows = result.rows as (string | null)[][]
     const shown = rows.slice(0, MAX_DISPLAYED_ROWS)
     const replay = explained
-      ? await replayQuery(db, {
+      ? await replayAndRestore(db, {
           plan: explained.plan,
           relations: explained.cache.relations,
           cacheBefore: explained.cache.before,
           columnCount: result.fields.length,
           resultRows: shown,
           totalRows: rows.length,
+          prepared: explained.prepared,
         })
       : null
     return {
@@ -175,7 +191,9 @@ export async function runStatement(
  *    pages of its own (index probes near a column's minimum or maximum), and
  *    on an empty cache it has to read them again.
  * 2. Snapshot the cache. Planning's reads are done, so the snapshot shows
- *    exactly what execution finds cached.
+ *    exactly what execution finds cached. Then let the replay read what it
+ *    needs to before the query runs (an index scan's index, see
+ *    prepareReplay), and evict what that loaded.
  * 3. Run it under `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)` for the
  *    real plan, with actual rows and buffer counts per node.
  *
@@ -193,11 +211,11 @@ async function explainQuery(
   db: PGliteInterface,
   sql: string,
   options: RunOptions,
-): Promise<{ plan: Plan; cache: QueryCache } | null> {
+): Promise<Explained | null> {
   const useSavepoint = (await transactionStatus(db)) === 'T'
   if (useSavepoint) await query(db, `SAVEPOINT ${EXPLAIN_SAVEPOINT}`)
   try {
-    const explained = await explainSteps(db, sql, options)
+    const explained = await explainSteps(db, sql, options, useSavepoint)
     if (useSavepoint) await query(db, `RELEASE SAVEPOINT ${EXPLAIN_SAVEPOINT}`)
     return explained
   } catch {
@@ -211,12 +229,17 @@ async function explainQuery(
 /** A name unlikely to be one of the visitor's own savepoints. */
 const EXPLAIN_SAVEPOINT = 'sql_visualizer_explain'
 
-/** The steps explainQuery describes. Throws Postgres's error if one fails. */
+/**
+ * The steps explainQuery describes. Throws Postgres's error if one fails.
+ * `inTransactionBlock`: the replay's own work then goes in a savepoint of its
+ * own, so a failed helper query fails only the replay.
+ */
 async function explainSteps(
   db: PGliteInterface,
   sql: string,
   options: RunOptions,
-): Promise<{ plan: Plan; cache: QueryCache }> {
+  inTransactionBlock: boolean,
+): Promise<Explained> {
   const planOnly = `EXPLAIN (BUFFERS, SUMMARY, VERBOSE, FORMAT JSON) ${sql}`
   let planned = await explainJson(db, planOnly)
   const relations = await findRelations(db, tablesInPlan(planned))
@@ -226,11 +249,39 @@ async function explainSteps(
     planned = await explainJson(db, planOnly)
   }
   const before = await snapshotCache(db, relations)
+  if (inTransactionBlock) await query(db, `SAVEPOINT ${REPLAY_SAVEPOINT}`)
+  const prepared = await prepareReplay(db, parsePlan(planned), relations)
+  if (inTransactionBlock) await query(db, `ROLLBACK TO SAVEPOINT ${REPLAY_SAVEPOINT}; RELEASE SAVEPOINT ${REPLAY_SAVEPOINT}`)
+  // What the replay read is evicted again, so the query finds the cache as the snapshot has it.
+  if (prepared !== null) await restoreCache(db, relations, before)
   const plan = parsePlan(await explainJson(db, `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) ${sql}`))
   // EXPLAIN ANALYZE plans the query again, but finds everything planning
   // needs already cached. Report the planning that did the reading instead.
-  return { plan: { ...plan, ...parsePlanning(planned) }, cache: { relations, emptied, before } }
+  return { plan: { ...plan, ...parsePlanning(planned) }, cache: { relations, emptied, before }, prepared }
 }
+
+/**
+ * Replays a query that has just run (steps 6 to 9 in ARCHITECTURE.md). The
+ * replay reads pages through shared buffers too, with pageinspect and by
+ * fetching rows, so afterwards every page it loaded is evicted again: the next
+ * query finds the cache exactly as this one left it.
+ *
+ * Inside a transaction block, a failed helper query would abort the visitor's
+ * transaction, so there the replay runs inside a savepoint, rolled back after.
+ * The replay changes no data, so rolling back loses nothing, and doesn't undo
+ * evictions, which aren't part of a transaction.
+ */
+export async function replayAndRestore(db: PGliteInterface, input: ReplayInput): Promise<Replay> {
+  const after = await snapshotCache(db, input.relations)
+  const useSavepoint = (await transactionStatus(db)) === 'T'
+  if (useSavepoint) await query(db, `SAVEPOINT ${REPLAY_SAVEPOINT}`)
+  const replay = await replayQuery(db, input)
+  if (useSavepoint) await query(db, `ROLLBACK TO SAVEPOINT ${REPLAY_SAVEPOINT}; RELEASE SAVEPOINT ${REPLAY_SAVEPOINT}`)
+  await restoreCache(db, input.relations, after)
+  return replay
+}
+
+const REPLAY_SAVEPOINT = 'sql_visualizer_replay'
 
 /** Runs an EXPLAIN (FORMAT JSON) and returns its JSON. */
 async function explainJson(db: PGliteInterface, sql: string): Promise<unknown> {

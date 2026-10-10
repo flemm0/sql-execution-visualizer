@@ -72,6 +72,77 @@ export interface HeapPageEvent {
   matchedRows: number
 }
 
+/**
+ * An index scan starts a search down its index, from the root, for the first
+ * entry that can match. The pages it goes through follow as index.visit events.
+ */
+export interface IndexSearchEvent {
+  type: 'index.search'
+  node: number
+  /** The index's relation id. */
+  index: number
+}
+
+/**
+ * An index scan looks at an index page: on the way down from the root, or
+ * moving right to the next leaf page for more matches.
+ */
+export interface IndexVisitEvent {
+  type: 'index.visit'
+  node: number
+  page: PageRef
+  /** 0 for a leaf page, one more for each level above. */
+  level: number
+  /**
+   * On the way down, the item (its offset on the page) whose child page the
+   * search goes to next; null on a leaf page, or when the search moves right
+   * to the page's neighbor instead.
+   */
+  downlink: number | null
+}
+
+/** An index entry on a leaf page matches the scan's conditions. It points at a heap row. */
+export interface IndexEntryEvent {
+  type: 'index.entry'
+  node: number
+  page: PageRef
+  /** The entry's offset on the page. */
+  offset: number
+  /** Its key, one value per key column, as Postgres writes them (null for NULL). */
+  key: (string | null)[]
+  /** The heap row it points at. */
+  row: RowRef
+}
+
+/**
+ * An index scan marks entries on a leaf page dead: it found that no
+ * transaction can see their rows any more, so later scans skip them.
+ */
+export interface IndexMarkDeadEvent {
+  type: 'index.markDead'
+  node: number
+  page: PageRef
+  /** The entries' offsets on the page. */
+  offsets: number[]
+}
+
+/**
+ * An index scan fetches the heap row an index entry points at, and checks
+ * it: can the query see that row, or a newer version of it on the same page
+ * (an UPDATE that kept the row on its page and left the index alone, a "HOT"
+ * update)? If so, does it pass the filter?
+ */
+export interface HeapTupleEvent {
+  type: 'heap.tuple'
+  node: number
+  /** The row the index entry points at. */
+  row: RowRef
+  /** The version of it the query can see; null if it can't see any (deleted, or not yet committed). */
+  visible: RowRef | null
+  /** Whether the visible version passed the filter (true when there is none); false when nothing is visible. */
+  matched: boolean
+}
+
 /** A node passes a row on: to its parent node, or, from the top node, to the result. */
 export interface RowEmitEvent {
   type: 'row.emit'
@@ -87,6 +158,11 @@ export type TraceEvent =
   | BufferHitEvent
   | BufferReadEvent
   | HeapPageEvent
+  | IndexSearchEvent
+  | IndexVisitEvent
+  | IndexEntryEvent
+  | IndexMarkDeadEvent
+  | HeapTupleEvent
   | RowEmitEvent
 
 export interface Trace {

@@ -108,6 +108,23 @@ describe('plan nodes', () => {
   })
 })
 
+describe('index scan nodes', () => {
+  it('carry their index, Index Cond, direction and number of searches', async () => {
+    const scan = (await planFor('SELECT * FROM orders o WHERE o.id BETWEEN 10 AND 20')).root
+    expect(scan).toMatchObject({
+      indexName: 'orders_pkey',
+      indexCond: '((o.id >= 10) AND (o.id <= 20))',
+      backward: false,
+      indexSearches: 1,
+    })
+    const backward = (await planFor('SELECT * FROM orders ORDER BY id DESC LIMIT 3')).root.children[0]
+    expect(backward).toMatchObject({ nodeType: 'Index Scan', indexCond: null, backward: true })
+
+    const seqScan = (await planFor('SELECT * FROM categories')).root
+    expect(seqScan).toMatchObject({ indexName: null, indexCond: null, backward: false, indexSearches: null })
+  })
+})
+
 describe('tablesInPlan', () => {
   async function tablesOf(sql: string) {
     const result = await db.query<{ 'QUERY PLAN': unknown }>(`EXPLAIN (VERBOSE, FORMAT JSON) ${sql}`)

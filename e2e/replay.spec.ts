@@ -23,10 +23,20 @@ test('example 2 replays and matches what Postgres reported, check by check', asy
   await expect(check(page, 'Result: rows')).toHaveText('✓ Result: rows189189')
 })
 
-test('a query with a node the replay engine doesn’t know yet says so', async ({ page }) => {
+test('example 1 replays an Index Scan and matches Postgres, searches down the index included', async ({ page }) => {
   await openApp(page)
   await runSql(page, 'SELECT * FROM orders WHERE id = 4242;')
-  await expect(replayStatus(page)).toHaveText('Animation isn’t available yet for Index Scan.')
+  await expect(replayStatus(page)).toContainText('✓ Replay matches Postgres · 6 checks')
+  await replayStatus(page).getByText('Replay matches Postgres').click()
+  await expect(check(page, 'Index Scan using orders_pkey on orders: index searches')).toHaveText(
+    '✓ Index Scan using orders_pkey on orders: index searches11',
+  )
+})
+
+test('a query with a node the replay engine doesn’t know yet says so', async ({ page }) => {
+  await openApp(page)
+  await runSql(page, 'SELECT count(*) FROM categories;')
+  await expect(replayStatus(page)).toHaveText('Animation isn’t available yet for Aggregate.')
 })
 
 test('a mismatch is shown with the checks that failed', async ({ page }) => {

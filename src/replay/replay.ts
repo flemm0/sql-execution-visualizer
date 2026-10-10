@@ -4,8 +4,10 @@ import type { Plan, PlanNode } from '../db/plan'
 import { query, queryText } from '../db/query'
 import { quoteIdentifier } from '../db/sql'
 import { SharedBuffers } from './buffers'
+import { replayIndexScan, walkIndexScan, type IndexWalk } from './indexScan'
 import { scanPages, seqScanEvents } from './seqScan'
 import type { RowRef, Trace, TraceEvent } from './trace'
+import { Unsupported } from './unsupported'
 import { allNodes, validate, type Validation } from './validate'
 
 /*
@@ -32,38 +34,89 @@ export interface ReplayInput {
   columnCount: number
   resultRows: (string | null)[][]
   totalRows: number
+  /** What prepareReplay found before the query ran; null if it had nothing to do. */
+  prepared: Prepared | null
 }
 
+/**
+ * What the replay found before the query ran: an index scan's walk of its
+ * index, or the error that stopped it (Unsupported, for one), to report with
+ * the replay.
+ */
+export type Prepared = { status: 'walked'; walk: IndexWalk } | { status: 'error'; error: unknown }
+
 /** Node types the replay engine can replay. */
-const REPLAYABLE = new Set(['Seq Scan'])
+const REPLAYABLE = new Set(['Seq Scan', 'Index Scan'])
+
+/**
+ * The part of a replay that has to happen before the query runs (in the
+ * order of ARCHITECTURE.md, after the cache snapshot and before execution).
+ * Running an index scan can change its index: it marks entries whose rows
+ * nobody can see any more as dead, and later scans skip them. So an index
+ * scan's index is walked first, as the query will find it. `plan` comes from
+ * a plain EXPLAIN (VERBOSE). Reading the pages loads them into shared
+ * buffers, so the caller evicts them again before running the query.
+ *
+ * Returns null when there's nothing to do before the query runs.
+ */
+export async function prepareReplay(db: PGliteInterface, plan: Plan, relations: Relation[]): Promise<Prepared | null> {
+  const root = plan.root
+  if (root.nodeType !== 'Index Scan' || root.children.length > 0) return null
+  const found = scanRelations(root, relations)
+  if (found === null || found.index === null) return null
+  try {
+    return { status: 'walked', walk: await walkIndexScan(db, root, found.index) }
+  } catch (error) {
+    return { status: 'error', error }
+  }
+}
+
+/** The table a scan reads, and the index it reads it through; null for a table not among the relations (a temporary table). */
+function scanRelations(node: PlanNode, relations: Relation[]): { table: Relation; index: Relation | null } | null {
+  // A table and an index can't share a name in a schema, so the name is enough.
+  const table = relations.find(
+    (relation) => relation.schema === node.relation?.schema && relation.name === node.relation?.name,
+  )
+  if (!table) return null
+  // An index lives in its table's schema.
+  const index = relations.find((relation) => relation.schema === table.schema && relation.name === node.indexName)
+  return { table, index: index ?? null }
+}
 
 /**
  * Replays a query, or says why it can't. Its own queries to Postgres read
- * only pages the query itself read, so the cache stays as the query left it.
- * (Replaying index scans will read B-tree pages with pageinspect; that will
- * need restoreCache afterwards, step 9 in ARCHITECTURE.md.)
+ * pages through shared buffers too (pageinspect, and fetching rows by ctid),
+ * so the caller puts the cache back afterwards (restoreCache, step 9 in
+ * ARCHITECTURE.md).
  */
 export async function replayQuery(db: PGliteInterface, input: ReplayInput): Promise<Replay> {
   const { plan, relations } = input
   const root = plan.root
   const missing = allNodes(root).find((node) => !REPLAYABLE.has(node.nodeType))
   if (missing) return { status: 'unsupported', reason: `Animation isn’t available yet for ${missing.nodeType}.` }
-  // A Seq Scan with children runs a subquery for its Filter (an InitPlan or SubPlan).
+  // A scan with children runs a subquery for a condition (an InitPlan or SubPlan).
   if (root.children.length > 0) return { status: 'unsupported', reason: 'Animation isn’t available yet for subqueries.' }
-  // A table and an index can't share a name in a schema, so the name is enough.
-  const table = relations.find(
-    (relation) => relation.schema === root.relation?.schema && relation.name === root.relation?.name,
-  )
-  if (!table) {
+  const found = scanRelations(root, relations)
+  if (found === null) {
     return {
       status: 'unsupported',
       reason: 'Animation isn’t available for temporary tables, which Postgres keeps outside shared buffers.',
     }
   }
 
+  const { table, index } = found
+
   try {
-    const pages = await scanPages(db, root, table)
     const buffers = new SharedBuffers(input.cacheBefore, relations)
+    let events: TraceEvent[]
+    const notes: string[] = []
+    if (root.nodeType === 'Index Scan') {
+      if (index === null) throw new Error(`${root.title}: no index ${root.indexName}`)
+      events = await replayIndexScan(db, root, table, index, await indexWalk(db, root, index, input.prepared), buffers)
+    } else {
+      events = [...seqScanEvents(root, table, await scanPages(db, root, table), buffers)]
+      notes.push(...(await ringBufferNotes(db, table)))
+    }
     const trace: Trace = {
       relations: relations.map((relation) => ({
         id: relation.oid,
@@ -71,16 +124,9 @@ export async function replayQuery(db: PGliteInterface, input: ReplayInput): Prom
         kind: relation.kind,
         pages: relation.pages,
       })),
-      events: [...seqScanEvents(root, table, pages, buffers)],
+      events,
     }
 
-    const notes: string[] = []
-    const ringSize = (await sharedBufferPages(db)) / 4
-    if (table.pages > ringSize) {
-      notes.push(
-        `${table.name} has more pages than a quarter of shared buffers (${ringSize.toLocaleString('en-US')}), so Postgres reads it through a small ring of buffers, which the replay doesn't model: buffer counts may not match.`,
-      )
-    }
     let replayedRows: (string | null)[][] | null = null
     if (root.output.length === input.columnCount) {
       replayedRows = await readRows(db, root, emittedRows(trace.events).slice(0, input.resultRows.length))
@@ -98,8 +144,22 @@ export async function replayQuery(db: PGliteInterface, input: ReplayInput): Prom
     })
     return { status: 'replayed', trace, validation }
   } catch (error) {
+    if (error instanceof Unsupported) return { status: 'unsupported', reason: error.message }
     return { status: 'failed', message: error instanceof Error ? error.message : String(error) }
   }
+}
+
+/**
+ * The index scan's walk from before the query ran, if it was for the plan
+ * that ran (EXPLAIN ANALYZE plans again, and could in theory pick another
+ * index); otherwise a walk now. Rethrows the error that stopped it.
+ */
+async function indexWalk(db: PGliteInterface, node: PlanNode, index: Relation, prepared: Prepared | null) {
+  if (prepared?.status === 'error') throw prepared.error
+  if (prepared?.status === 'walked' && prepared.walk.indexName === node.indexName && prepared.walk.indexCond === node.indexCond) {
+    return prepared.walk
+  }
+  return walkIndexScan(db, node, index)
 }
 
 /** The rows sent to the result, in result order. */
@@ -128,6 +188,15 @@ async function readRows(db: PGliteInterface, node: PlanNode, rows: RowRef[]): Pr
        ON ${quoteIdentifier(alias)}.ctid = replay_wanted.replay_tid
      ORDER BY replay_wanted.replay_position`,
   )
+}
+
+/** A note if a Seq Scan reads its table through a ring of buffers, which the replay doesn't model. */
+async function ringBufferNotes(db: PGliteInterface, table: Relation): Promise<string[]> {
+  const ringSize = (await sharedBufferPages(db)) / 4
+  if (table.pages <= ringSize) return []
+  return [
+    `${table.name} has more pages than a quarter of shared buffers (${ringSize.toLocaleString('en-US')}), so Postgres reads it through a small ring of buffers, which the replay doesn't model: buffer counts may not match.`,
+  ]
 }
 
 /** The size of shared buffers, in pages. */
