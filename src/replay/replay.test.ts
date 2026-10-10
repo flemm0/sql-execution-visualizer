@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createDatabase } from '../db/createDatabase'
 import { runStatementAt, type RowsResult, type RunOptions } from '../db/runner'
 import { seedDatabase } from '../db/seed'
-import type { Replay } from './replay'
+import { CATALOG_NOTE, type Replay } from './replay'
 import type { RowRef, Trace, TraceEvent } from './trace'
 
 let db: PGlite
@@ -457,6 +457,159 @@ describe('replaying an Index Scan', () => {
   })
 })
 
+describe('replaying an Index Scan with a list of values, or a skip scan', () => {
+  // A session's first scan of a kind also looks things up in the system
+  // catalogs (the operators for a pair of types, whether a type can count
+  // up), and Postgres counts those page accesses as the scan's. The replay
+  // doesn't model them, so run each kind once first.
+  beforeAll(async () => {
+    await without(['enable_seqscan', 'enable_bitmapscan'], async () => {
+      await run(`SELECT * FROM orders WHERE id = ANY ('{1,2}')`)
+      await run(`SELECT * FROM orders WHERE id = ANY ('{1,2}'::bigint[])`)
+      await run(`SELECT * FROM orders WHERE customer_id > 9990 AND order_date < '2022-06-01'`)
+      await run(`SELECT * FROM customers WHERE last_name > 'Y' AND first_name = 'Mary'`)
+    })
+  })
+
+  /** For each search down from the root, the first page it reads. */
+  function searchStarts(trace: Trace) {
+    const starts: number[] = []
+    trace.events.forEach((event, i) => {
+      if (event.type !== 'index.search') return
+      const visit = trace.events.slice(i).find((later) => later.type === 'index.visit')
+      if (visit?.type === 'index.visit') starts.push(visit.page.block)
+    })
+    return starts
+  }
+
+  it('searches again from the root for a value of the list that isn’t on the leaf it’s reading', async () => {
+    const { trace } = await replayed(`SELECT * FROM orders WHERE id = ANY ('{9000,5,77}')`)
+    // 5 and 77 are on the first leaf page; 9000 is many pages to the right.
+    const { root } = await btree('orders_pkey')
+    expect(searchStarts(trace)).toEqual([root, root])
+    expect(ofType(trace, 'index.entry').map((event) => event.key)).toEqual([['5'], ['77'], ['9000']])
+    expect(ofType(trace, 'row.emit').map((event) => text(event.row))).toEqual(
+      await ctidsOf('SELECT ctid::text FROM orders WHERE id IN (5, 77, 9000) ORDER BY id'),
+    )
+  })
+
+  it('sorts the list, drops duplicates and NULLs, compares across types, and searches nothing for an empty list', async () => {
+    const { trace } = await replayed(`SELECT * FROM orders WHERE id = ANY ('{9000,5,NULL,5,99999999999}'::bigint[])`)
+    expect(ofType(trace, 'index.entry').map((event) => event.key)).toEqual([['5'], ['9000']])
+    // 99999999999 is past every key, but finding that out takes a search too.
+    expect(ofType(trace, 'index.search')).toHaveLength(3)
+
+    const empty = await replayed(`SELECT * FROM orders WHERE id = ANY ('{}'::integer[])`)
+    expect(ofType(empty.trace, 'index.search')).toEqual([])
+    expect(ofType(empty.trace, 'index.visit')).toEqual([])
+  })
+
+  it('lists on two columns move together: each pair of values in index order', async () => {
+    const { trace } = await without(['enable_bitmapscan'], () =>
+      replayed(
+        `SELECT * FROM customers WHERE last_name IN ('Stewart', 'Robertson', 'Grant') AND first_name IN ('Patrick', 'Barbara', 'Sven')`,
+      ),
+    )
+    const keys = ofType(trace, 'index.entry').map((event) => event.key)
+    const expected = await db.query<{ last_name: string; first_name: string }>(
+      `SELECT last_name, first_name FROM customers
+       WHERE last_name IN ('Stewart', 'Robertson', 'Grant') AND first_name IN ('Patrick', 'Barbara', 'Sven')
+       ORDER BY last_name, first_name`,
+    )
+    expect(keys.length).toBeGreaterThan(5)
+    expect(keys).toEqual(expected.rows.map((row) => [row.last_name, row.first_name]))
+  })
+
+  it('example 8: skips through every last name to find first_name = ’Mary’, though the index starts with last_name', async () => {
+    await without(['enable_seqscan', 'enable_bitmapscan'], async () => {
+      const { result, trace } = await replayed(`SELECT * FROM customers WHERE first_name = 'Mary'`)
+      const count = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM customers WHERE first_name = 'Mary'`)
+      expect(result.totalRows).toBe(count.rows[0].n)
+      expect(ofType(trace, 'index.entry').every((event) => event.key[1] === 'Mary')).toBe(true)
+    })
+  })
+
+  it('a skip scan over a column that counts up: one search per value, into the NULLs too', async () => {
+    await db.exec(`
+      CREATE TABLE grid (a int, b int, note text) WITH (autovacuum_enabled = off);
+      INSERT INTO grid SELECT n % 10, n / 10, 'cell ' || n FROM generate_series(0, 19999) AS n;
+      INSERT INTO grid SELECT NULL, NULL, 'blank' FROM generate_series(1, 300);
+      CREATE INDEX grid_a_b_idx ON grid (a, b);
+      ANALYZE grid;
+    `)
+    await without(['enable_seqscan', 'enable_bitmapscan'], async () => {
+      const { trace } = await replayed('SELECT * FROM grid WHERE b = 5')
+      const { root } = await btree('grid_a_b_idx')
+      const starts = searchStarts(trace)
+      expect(starts.length).toBeGreaterThan(10)
+      expect(new Set(starts)).toEqual(new Set([root]))
+      expect(ofType(trace, 'index.entry').map((event) => event.key)).toEqual(
+        Array.from({ length: 10 }, (_, a) => [String(a), '5']),
+      )
+
+      // A range on the skipped column bounds the values it goes through.
+      const ranged = await replayed('SELECT * FROM grid WHERE a > 6 AND b = 5')
+      expect(ofType(ranged.trace, 'index.entry').map((event) => event.key[0])).toEqual(['7', '8', '9'])
+      expect(ofType(ranged.trace, 'index.search').length).toBeLessThan(starts.length)
+    })
+
+    // Reading on from the end of one value of a into the start of the next,
+    // b starts low again, below the range: (4, 0) has the note, but b is out.
+    await db.exec('DROP INDEX grid_a_b_idx; DELETE FROM grid WHERE a IS NULL')
+    await db.exec('VACUUM grid')
+    await db.exec('CREATE INDEX grid_a_b_note_idx ON grid (a, b, note); ANALYZE grid')
+    await without(['enable_seqscan', 'enable_bitmapscan', 'enable_indexonlyscan'], async () => {
+      const { result } = await replayed(`SELECT * FROM grid WHERE b > 1995 AND note = 'cell 4'`)
+      expect(result.totalRows).toBe(0)
+    })
+    await db.exec('DROP TABLE grid')
+  })
+
+  it('explains the extra buffer hits of a session’s first skip scan over a type: Postgres reads system catalogs', async () => {
+    await db.exec(`
+      CREATE TABLE readings (sensor bigint, n int) WITH (autovacuum_enabled = off);
+      INSERT INTO readings SELECT s, n FROM generate_series(1, 5) AS s, generate_series(1, 2000) AS n;
+      CREATE INDEX readings_sensor_n_idx ON readings (sensor, n);
+      ANALYZE readings;
+    `)
+    await without(['enable_seqscan', 'enable_bitmapscan', 'enable_indexonlyscan'], async () => {
+      const sql = 'SELECT * FROM readings WHERE n = 7'
+      // No earlier test skip-scans a bigint column.
+      const first = (await run(sql)).replay
+      if (first?.status !== 'replayed') throw new Error(JSON.stringify(first))
+      expect(first.validation.checks.filter((check) => !check.ok).map((check) => check.label)).toEqual([
+        'Index Scan using readings_sensor_n_idx on readings: buffer hits',
+      ])
+      expect(first.validation.notes).toContain(CATALOG_NOTE)
+
+      const again = await replayed(sql)
+      expect(again.validation.notes).not.toContain(CATALOG_NOTE)
+    })
+    await db.exec('DROP TABLE readings')
+  })
+
+  it('the first scan after a delete marks dead entries before it searches again; the next skips them', async () => {
+    await db.exec(`
+      CREATE TABLE seats (id int PRIMARY KEY, row_name text) WITH (autovacuum_enabled = off);
+      INSERT INTO seats SELECT n, 'row ' || (n / 20) FROM generate_series(1, 5000) AS n;
+      DELETE FROM seats WHERE id IN (3, 13);
+    `)
+    const sql = `SELECT * FROM seats WHERE id = ANY ('{3,13,23,4003}')`
+    const first = await without(['enable_bitmapscan'], () => replayed(sql))
+    const types = first.trace.events.map((event) => event.type)
+    const [marked] = ofType(first.trace, 'index.markDead')
+    expect(marked.offsets).toHaveLength(2)
+    // Leaving the first leaf for a new search from the root: the dead entries are marked first.
+    expect(types.indexOf('index.markDead')).toBeLessThan(types.lastIndexOf('index.search'))
+    expect(ofType(first.trace, 'index.search')).toHaveLength(2)
+
+    const second = await without(['enable_bitmapscan'], () => replayed(sql))
+    expect(ofType(second.trace, 'index.markDead')).toEqual([])
+    expect(ofType(second.trace, 'heap.tuple')).toHaveLength(2)
+    await db.exec('DROP TABLE seats')
+  })
+})
+
 describe('a replay that can’t match', () => {
   it('a volatile filter picks other rows each time, and the validator says so', async () => {
     // random() is evaluated anew by EXPLAIN ANALYZE, the query, and the replay's own query.
@@ -479,12 +632,9 @@ describe('a query the replay engine can’t replay yet', () => {
   })
 
   it('says which kind of index scan isn’t supported', async () => {
-    expect(await reason(`SELECT * FROM orders WHERE id = ANY ('{5,77,9000}')`)).toBe(
-      'Animation isn’t available yet for index conditions with a list of values (= ANY).',
-    )
     await without(['enable_seqscan', 'enable_bitmapscan'], async () => {
-      expect(await reason(`SELECT * FROM customers WHERE first_name = 'Mary'`)).toBe(
-        'Animation isn’t available yet for skip scans, where an index column without an = condition comes before a column with a condition.',
+      expect(await reason(`SELECT * FROM orders WHERE id < ANY ('{5,77}')`)).toBe(
+        `Animation isn’t available yet for the index condition orders.id < ANY ('{5,77}'::integer[]).`,
       )
       expect(await reason('SELECT * FROM orders WHERE id < 100 ORDER BY id DESC')).toBe(
         'Animation isn’t available yet for backward index scans.',

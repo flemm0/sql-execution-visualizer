@@ -1,6 +1,6 @@
 # 0025: Replay an Index Scan from decoded B-tree keys, walking the index before the query runs
 
-- **Status:** Accepted
+- **Status:** Accepted; extended by [0026](0026-lists-and-skip-scans.md) (lists of values and skip scans, and how comparisons are batched)
 - **Date:** 2026-10-10
 
 ## Context

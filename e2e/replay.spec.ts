@@ -47,3 +47,24 @@ test('a mismatch is shown with the checks that failed', async ({ page }) => {
   await expect(replayStatus(page)).toContainText('✗ Replay doesn’t match Postgres')
   await expect(check(page, 'Result: rows with the same values, in the same order')).toContainText('✗')
 })
+
+test('a list of values replays, searching the index once more for a value far to the right', async ({ page }) => {
+  await openApp(page)
+  await runSql(page, 'SELECT * FROM orders WHERE id IN (5, 77, 9000);')
+  await expect(replayStatus(page)).toContainText('✓ Replay matches Postgres')
+  await replayStatus(page).getByText('Replay matches Postgres').click()
+  await expect(check(page, 'Index Scan using orders_pkey on orders: index searches')).toHaveText(
+    '✓ Index Scan using orders_pkey on orders: index searches22',
+  )
+})
+
+test('a skip scan replays; its first run explains the system catalog pages Postgres counted', async ({ page }) => {
+  await openApp(page)
+  const sql = `SELECT * FROM orders WHERE customer_id < 100 AND order_date = '2023-06-01';`
+  await runSql(page, sql)
+  await expect(replayStatus(page)).toContainText('A session’s first skip scan over a column type also reads system catalog pages')
+  await runSql(page, sql)
+  await expect(replayStatus(page)).toContainText('✓ Replay matches Postgres')
+  await replayStatus(page).getByText('Replay matches Postgres').click()
+  await expect(check(page, 'Index Scan using orders_customer_id_order_date_idx on orders: index searches')).toBeVisible()
+})

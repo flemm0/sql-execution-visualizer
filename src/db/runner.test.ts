@@ -340,7 +340,7 @@ describe('errors inside a transaction block', () => {
     await db.exec(`
       CREATE FUNCTION picky() RETURNS int STABLE LANGUAGE plpgsql AS $$
       BEGIN
-        IF current_query() LIKE '%AS what%' THEN RAISE EXCEPTION 'not in the replay'; END IF;
+        IF current_query() LIKE '%AS answers(what%' THEN RAISE EXCEPTION 'not in the replay'; END IF;
         RETURN 4242;
       END $$;
     `)
