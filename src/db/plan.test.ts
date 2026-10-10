@@ -1,7 +1,7 @@
 import type { PGlite } from '@electric-sql/pglite'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createDatabase } from './createDatabase'
-import { parsePlan, type PlanNode } from './plan'
+import { parsePlan, parsePlanning, tablesInPlan, type PlanNode } from './plan'
 import { seedDatabase } from './seed'
 
 let db: PGlite
@@ -73,5 +73,47 @@ describe('details', () => {
   it('leave out zero counters, as text EXPLAIN does', async () => {
     const plan = await planFor('SELECT * FROM orders WHERE id = 4242')
     expect(plan.root.details.map((detail) => detail.label)).toEqual(['Index Cond', 'Index Searches'])
+  })
+})
+
+describe('tablesInPlan', () => {
+  async function tablesOf(sql: string) {
+    const result = await db.query<{ 'QUERY PLAN': unknown }>(`EXPLAIN (VERBOSE, FORMAT JSON) ${sql}`)
+    return tablesInPlan(result.rows[0]['QUERY PLAN'])
+  }
+
+  it('lists each table a plan reads once, with its schema, from every level of the tree', async () => {
+    expect(await tablesOf('SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id = 4242')).toEqual([
+      { schema: 'public', name: 'orders' },
+      { schema: 'public', name: 'customers' },
+    ])
+    // A self-join, and a subquery the planner keeps as a SubPlan.
+    expect(
+      await tablesOf(`SELECT * FROM orders a JOIN orders b ON b.id = a.id + 1
+                      WHERE a.total > (SELECT avg(price) FROM products WHERE category_id = a.id)`),
+    ).toEqual([
+      { schema: 'public', name: 'orders' },
+      { schema: 'public', name: 'products' },
+    ])
+  })
+
+  it('sees through a view to its tables, and lists none for a query without one', async () => {
+    await db.exec('CREATE VIEW cheap_products AS SELECT * FROM products WHERE price < 10')
+    expect(await tablesOf('SELECT * FROM cheap_products')).toEqual([{ schema: 'public', name: 'products' }])
+    await db.exec('DROP VIEW cheap_products')
+    expect(await tablesOf('SELECT 1')).toEqual([])
+  })
+})
+
+describe('parsePlanning', () => {
+  it('reads planning’s time and buffer counts, which a plan without ANALYZE reports too', async () => {
+    await db.query(`SELECT pg_buffercache_evict_relation('orders_customer_id_order_date_idx')`)
+    // 1 is the lowest customer_id, so the planner reads index pages to find the real minimum.
+    const result = await db.query<{ 'QUERY PLAN': unknown }>(
+      'EXPLAIN (BUFFERS, SUMMARY, FORMAT JSON) SELECT * FROM orders WHERE customer_id BETWEEN 1 AND 100',
+    )
+    const planning = parsePlanning(result.rows[0]['QUERY PLAN'])
+    expect(planning.planningMs).toBeGreaterThan(0)
+    expect(planning.planningRead).toBeGreaterThan(0)
   })
 })

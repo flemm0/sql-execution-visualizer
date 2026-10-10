@@ -82,14 +82,14 @@ Three zones show the path a page takes: **disk → shared buffers → executor**
   - examine a row
   - emit a row
 - **~30 s budget at normal speed.** Early pages play row by row, then the player moves a page at a time ("page 37: 150 rows checked, 2 matched"). Matching rows still flash individually. Every condensed stretch can be expanded and stepped through in full ([ADR 0005](decisions/0005-realistic-data-and-30s-budget.md)).
-- **Empty-cache toggle:** "Start with an empty cache" is on by default, so every page is first read from disk. Turn it off and rerun to see buffer hits.
+- **Empty-cache toggle:** the **Empty cache** checkbox in the editor toolbar ("start with an empty cache") is on by default, so before each query its tables' and indexes' pages are evicted and every page is first read from disk. Turn it off and rerun to see buffer hits. The choice is remembered in that browser.
 
 ## Running statements
 
 - **Editor:** CodeMirror with Postgres syntax. It completes keywords, schemas, tables and columns from the live catalog, so a table created a moment ago completes too. Syntax colors stay neutral, because the accent colors are reserved for their meanings. The editor's text is remembered in that browser.
 - `Cmd/Ctrl+Enter` (or **Run**) runs the statement under the cursor; `Shift+Cmd/Ctrl+Enter` (or **Run all**) runs the whole editor in order and stops at the first error.
 - **Results pane:** one status line per statement ("SELECT: 3 rows, 2 ms", "CREATE INDEX: done, 18 ms", "UPDATE: 4 rows"), Postgres's notices under it, then the rows of the last statement that returned any. Values appear exactly as Postgres prints them (dates as `2024-02-29`, booleans as `t`/`f`), and NULL as a dimmed *NULL*.
-- **Plan pane:** the plan of the last query in the run: each node's heading as in text EXPLAIN, actual vs. estimated rows, shared-buffer hits and reads, and its conditions (Index Cond, Filter, Rows Removed by Filter, …), plus planning and execution time. A run with no query leaves a note saying so.
+- **Plan pane:** the plan of the last query in the run: each node's heading as in text EXPLAIN, actual vs. estimated rows, shared-buffer hits and reads, and its conditions (Index Cond, Filter, Rows Removed by Filter, …), plus planning time and the pages planning found cached or read (system catalogs, index probes; not part of any node's counts), and execution time. A run with no query leaves a note saying so.
 - **SELECT:** the plan appears immediately and the animation autoplays (a setting can switch autoplay off; then it loads paused at step 0). Results fill in as rows are emitted; **Skip to end** reveals the final result instantly. (Until the animation exists, the plan and the full result appear together.)
 - **Other statements:** a status line; the schema browser refreshes; no plan and no animation in v1.
 - **SQL errors:** Postgres's message in the results pane, with its DETAIL and HINT, and the line and column it points at; clicking those puts the cursor there.

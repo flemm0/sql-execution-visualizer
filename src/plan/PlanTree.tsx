@@ -7,6 +7,8 @@ const decimal = new Intl.NumberFormat('en-US', { maximumFractionDigits: 3 })
  * The plan Postgres used, as a tree: each node with estimated vs. actual
  * rows, the pages it found in shared buffers (hits) or read into them
  * (reads), and its conditions. Children are the nodes it pulls rows from.
+ * Below it, what planning and execution took. Planning's buffers (system
+ * catalogs, index probes) aren't part of any node's.
  */
 export function PlanTree({ plan }: { plan: Plan }) {
   return (
@@ -14,9 +16,11 @@ export function PlanTree({ plan }: { plan: Plan }) {
       <ul aria-label="Plan nodes">
         <PlanNodeItem node={plan.root} />
       </ul>
-      <p className="mt-3 font-mono text-fg-muted">
-        Planning {decimal.format(plan.planningMs)} ms · Execution {decimal.format(plan.executionMs)} ms
+      <p className="mt-3 font-mono text-fg-muted" data-testid="plan-planning">
+        Planning {decimal.format(plan.planningMs)} ms · buffers: hit {integer.format(plan.planningHit)} · read{' '}
+        {integer.format(plan.planningRead)}
       </p>
+      <p className="font-mono text-fg-muted">Execution {decimal.format(plan.executionMs)} ms</p>
     </div>
   )
 }

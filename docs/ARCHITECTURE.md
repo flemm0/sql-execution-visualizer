@@ -29,9 +29,9 @@ Postgres exposes *what* happened (the plan, the result, and per-node totals in `
 
 The order matters for getting buffer hits and reads exactly right; the measurements behind it are in [ADR 0022](decisions/0022-replay-pipeline-placement-and-buffer-counts.md).
 
-1. **Empty the cache.** If "start with an empty cache" is on, evict the buffers of every relation in the query (`pg_buffercache_evict_relation`).
-2. **Plan.** Run a plain `EXPLAIN`. The planner reads pages of its own (an index's metapage, and index probes for ranges near a column's minimum or maximum); doing it now keeps those reads out of the replay.
-3. **Snapshot the cache.** Record which pages of the query's relations are cached (`pg_buffercache`). The replay decides hit or read from this.
+1. **Plan.** Run a plain `EXPLAIN (BUFFERS, SUMMARY, VERBOSE, FORMAT JSON)`. The planner reads pages of its own (an index's metapage, and index probes for ranges near a column's minimum or maximum); doing it now keeps those reads out of the replay. The plan names the tables the query reads (a view shows up as the tables underneath); those tables and all their indexes are **the query's relations**. Temporary tables are left out: they live in the session's own buffers, not shared buffers.
+2. **Empty the cache.** If **Empty cache** is on, evict every page of the query's relations (`pg_buffercache_evict_relation`), then plan again: on an empty cache the planner has to read its index probes again, as it would in a real run. The plan view shows the buffer counts of this last planning, since `EXPLAIN ANALYZE` plans once more and finds everything already cached.
+3. **Snapshot the cache.** Record which pages of the query's relations are cached (`pg_buffercache`), in every fork. The replay decides hit or read from this.
 4. **Execute.** Run `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)`. This gives the real plan tree, estimated vs. actual rows per node, and real buffer hits and reads.
 5. **Get the result.** Run the query itself for the result rows, then snapshot the cache again: this is what the query leaves behind.
 6. **Inspect.** Read the pages the plan touches: B-tree root-to-leaf paths and leaf pages (`bt_page_items`; posting lists from B-tree deduplication included), and heap pages (`heap_page_items`). Pages are fetched lazily, in batches, and memoized for the run.
@@ -52,7 +52,14 @@ Other statements (DDL, DML, `ANALYZE`, `VACUUM`) just run. After each run (one s
 - **Results** are capped at 1,000 displayed rows (the total count is always reported). After each run the catalog (schema browser and editor completion) and the seed version are reloaded.
 
 ### Inspector (main thread)
-Typed wrappers around `pageinspect` and `pg_buffercache`. Like the statement runner, it sends queries with `execProtocolRaw`, and reads pages in batches: each query through the worker proxy costs about a millisecond on top of Postgres's own work ([ADR 0022](decisions/0022-replay-pipeline-placement-and-buffer-counts.md)). Decodes index keys from raw bytes for simple fixed-width types (int, bigint, date, timestamp). For other types it reads the key from the heap row the index entry points to, evaluating the index's column expressions in SQL.
+`src/db/inspector.ts`: typed wrappers around `pageinspect` and `pg_buffercache`. Like the statement runner, it sends queries with `execProtocolRaw`, and reads pages in batches, one or two queries however many pages: each query through the worker proxy costs about a millisecond on top of Postgres's own work ([ADR 0022](decisions/0022-replay-pipeline-placement-and-buffer-counts.md)).
+
+- **Relations:** the query's tables and their indexes, with their sizes in pages (`findRelations`).
+- **Cache:** evict relations (`evictRelations`), snapshot which of their pages are cached, by fork (`snapshotCache`), and put the cache back as a snapshot had it by evicting what was loaded since (`restoreCache`, step 9).
+- **Heap pages:** each line pointer and its tuple header (state, `xmin`, `xmax`, `t_ctid`, infomask) via `heap_page_items`.
+- **B-tree pages:** the metapage (`bt_metap`), and each page's level, flags, left and right neighbors (`bt_page_stats`) and items (`bt_page_items`): high keys, downlinks to child pages, and leaf entries with the heap rows they point at, posting lists included.
+
+Not yet: decoding index keys. The plan is to decode them from raw bytes for simple fixed-width types (int, bigint, date, timestamp), and for other types read the key from the heap row the index entry points to, evaluating the index's column expressions in SQL.
 
 ### Replay engine (main thread)
 One replayer per plan node type. Each mirrors the executor's demand-pull iterator model (each node pulls rows from its children one at a time), written as TypeScript generators so v2 joins compose naturally. Replayers emit trace events and pass rows to their parent.

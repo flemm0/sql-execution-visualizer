@@ -1,7 +1,8 @@
 import type { PGlite } from '@electric-sql/pglite'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createDatabase } from './createDatabase'
-import { MAX_DISPLAYED_ROWS, runAll, runStatementAt, type StatementResult } from './runner'
+import { cachedBlocks, findRelations, snapshotCache } from './inspector'
+import { MAX_DISPLAYED_ROWS, runAll, runStatementAt, type RunOptions, type StatementResult } from './runner'
 import { seedDatabase } from './seed'
 
 let db: PGlite
@@ -18,8 +19,8 @@ function expectStatus<S extends StatementResult['status']>(result: StatementResu
   return result as Extract<StatementResult, { status: S }>
 }
 
-async function runOne(sql: string) {
-  const [result] = await runStatementAt(db, sql, 0)
+async function runOne(sql: string, options: RunOptions = {}) {
+  const [result] = await runStatementAt(db, sql, 0, options)
   return result
 }
 
@@ -96,6 +97,88 @@ describe('a query', () => {
     const count = await db.query<{ count: number }>('SELECT count(*)::int AS count FROM once')
     expect(count.rows[0].count).toBe(1)
     await runOne('DROP TABLE once')
+  })
+})
+
+describe('the cache a query starts with', () => {
+  /** The plan's buffer counts for its top node, which include its children's. */
+  async function buffers(sql: string, options: RunOptions) {
+    const result = expectStatus(await runOne(sql, options), 'rows')
+    return { hit: result.plan?.root.sharedHit, read: result.plan?.root.sharedRead }
+  }
+
+  it('is emptied of the query’s tables and indexes when asked, so every page is read (example 1)', async () => {
+    const sql = 'SELECT * FROM orders WHERE id = 4242'
+    // The B-tree root, one leaf and one heap page.
+    expect(await buffers(sql, { emptyCache: true })).toEqual({ hit: 0, read: 3 })
+    expect(await buffers(sql, { emptyCache: true })).toEqual({ hit: 0, read: 3 })
+    expect(await buffers(sql, {})).toEqual({ hit: 3, read: 0 })
+  })
+
+  it('is emptied through a view, of the tables underneath', async () => {
+    await runOne('CREATE VIEW big_orders AS SELECT * FROM orders WHERE total > 900')
+    const result = expectStatus(await runOne('SELECT count(*) FROM big_orders', { emptyCache: true }), 'rows')
+    expect(result.cache?.emptied).toBe(true)
+    expect(result.cache?.relations.map((relation) => relation.name)).toEqual([
+      'orders',
+      'orders_customer_id_order_date_idx',
+      'orders_pkey',
+    ])
+    expect(result.cache?.before.pages).toEqual([])
+    expect(result.plan?.root.sharedHit).toBe(0)
+    await runOne('DROP VIEW big_orders')
+  })
+
+  it('is snapshotted after planning, which can read index pages of its own', async () => {
+    // Without these the planner picks a Bitmap Heap Scan.
+    await db.exec('SET enable_bitmapscan = off; SET enable_seqscan = off')
+    // 1 is the lowest customer_id, so the planner probes the index for the real minimum.
+    const sql = 'SELECT * FROM orders WHERE customer_id BETWEEN 1 AND 100'
+    const result = expectStatus(await runOne(sql, { emptyCache: true }), 'rows')
+    await db.exec('RESET enable_bitmapscan; RESET enable_seqscan')
+
+    const [orders] = result.cache?.relations ?? []
+    const index = result.cache?.relations.find((relation) => relation.name === 'orders_customer_id_order_date_idx')
+    if (!result.plan || !result.cache || !orders || !index) throw new Error('no plan or cache')
+    const probed = cachedBlocks(result.cache.before, index)
+    expect(probed.size).toBeGreaterThan(0)
+    // The plan reports the planning that read them, not EXPLAIN ANALYZE's own (which found them cached).
+    expect(result.plan.planningRead).toBeGreaterThanOrEqual(probed.size)
+
+    // Execution finds the probed index pages cached: hits, not reads. Heap pages
+    // count once each time the scan moves to another page (ADR 0022).
+    const scannedIndexPages = cachedBlocks(await snapshotCache(db, [index]), index).size
+    const rows = await db.query<{ page: number }>(
+      `SELECT (ctid::text::point)[0]::int AS page FROM orders WHERE customer_id BETWEEN 1 AND 100
+       ORDER BY customer_id, order_date, ctid`,
+    )
+    const heap = { hit: 0, read: 0 }
+    const seen = new Set(cachedBlocks(result.cache.before, orders))
+    rows.rows.forEach((row, i) => {
+      if (i > 0 && rows.rows[i - 1].page === row.page) return
+      if (seen.has(row.page)) heap.hit++
+      else heap.read++
+      seen.add(row.page)
+    })
+    expect(result.plan.root).toMatchObject({
+      sharedHit: heap.hit + probed.size,
+      sharedRead: heap.read + scannedIndexPages - probed.size,
+    })
+  })
+
+  it('is left as it is by default, and snapshotted with the pages already cached', async () => {
+    const sql = 'SELECT * FROM categories WHERE id = 3'
+    await runOne(sql)
+    const result = expectStatus(await runOne(sql), 'rows')
+    expect(result.cache?.emptied).toBe(false)
+    const [categories] = await findRelations(db, [{ schema: 'public', name: 'categories' }])
+    expect(result.cache && cachedBlocks(result.cache.before, categories)).toEqual(new Set([0]))
+    expect(result.plan?.root).toMatchObject({ sharedHit: 1, sharedRead: 0 })
+  })
+
+  it('is not looked at for a query that reads no table', async () => {
+    const result = expectStatus(await runOne('SELECT 1', { emptyCache: true }), 'rows')
+    expect(result.cache).toEqual({ relations: [], emptied: true, before: { pages: [] } })
   })
 })
 
