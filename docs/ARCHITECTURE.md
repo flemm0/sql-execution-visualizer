@@ -39,6 +39,8 @@ The order matters for getting buffer hits and reads exactly right; the measureme
 8. **Validate.** Compare the replay with steps 4 and 5 (see Validator).
 9. **Restore the cache.** Inspection reads pages through shared buffers too. Evict each buffer that wasn't in the second snapshot (`pg_buffercache_evict`), so the next run sees exactly the cache this query left behind. (Not wired in yet: a Seq Scan replay reads only pages the query itself read. It comes with the Index Scan replay, which reads B-tree pages with pageinspect.)
 
+If Postgres rejects any of steps 1–4, they are dropped and step 5 runs anyway: the query itself reports the error, with positions that match the editor text rather than the `EXPLAIN` prefix. Inside a transaction block, a failed `EXPLAIN` would abort the visitor's transaction, so step 5 would only say "current transaction is aborted". There, steps 1–4 run inside a savepoint, released when they succeed and rolled back when one fails. The rollback doesn't undo evictions, and doesn't need to: they change only the cache, not the visitor's data. In a transaction block that has already failed, no savepoint can be made, and the query reports "current transaction is aborted" as psql would.
+
 Other statements (DDL, DML, `ANALYZE`, `VACUUM`) just run. After each run (one statement or Run all), the autovacuum simulator checks thresholds, then the schema browser and page views refresh.
 
 ## Components
