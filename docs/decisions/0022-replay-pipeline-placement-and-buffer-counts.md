@@ -1,6 +1,6 @@
 # 0022: Run the replay pipeline on the main thread, and reproduce buffer counts exactly
 
-- **Status:** Accepted
+- **Status:** Accepted; the `relaxedDurability` part is superseded by [0023](0023-save-once-per-run.md)
 - **Date:** 2026-10-09
 
 ## Context
@@ -50,7 +50,7 @@ Things the spike found along the way:
 ## Decision
 - **The inspector, replay engine and validator run on the main thread**, over the same worker connection as the statement runner. They send queries with `execProtocolRaw` (the simple query protocol, as the runner does), never `db.query`.
 - **Page data is read in batches and only when needed:** one query per relation and step (for example, per-page row counts for a Seq Scan from `ctid`s), and `heap_page_items` / `bt_page_items` only for pages the player shows in detail ([ARCHITECTURE.md, lazy detail](../ARCHITECTURE.md#player-main-thread)).
-- **PGlite runs with `relaxedDurability`.** This lands in its own PR, together with Playwright checks that changes still survive a reload, because it changes how M1 persists data ([ADR 0011](0011-persist-in-indexeddb.md)).
+- ~~**PGlite runs with `relaxedDurability`.**~~ Superseded by [ADR 0023](0023-save-once-per-run.md): it lost writes followed by a quick reload; the pages' queries skip the save instead, and the app saves once per run.
 - **A SELECT runs in this order:**
   1. If "Start with an empty cache" is on, evict every relation in the query with `pg_buffercache_evict_relation`.
   2. Plan it with a plain `EXPLAIN` (no ANALYZE), so the planner's own reads happen now.

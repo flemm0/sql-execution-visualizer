@@ -1,4 +1,5 @@
 import type { PGliteInterface } from '@electric-sql/pglite'
+import { query } from './query'
 
 /*
  * PGlite runs Postgres as a single process, so there is no autovacuum. This
@@ -84,11 +85,11 @@ export interface AutovacuumAction {
  * as soon as this statement finishes, so the following query sees every write.
  */
 export async function flushStatistics(db: PGliteInterface) {
-  await db.query('SELECT pg_stat_force_next_flush()')
+  await query(db, 'SELECT pg_stat_force_next_flush()')
 }
 
 export async function readAutovacuumSettings(db: PGliteInterface): Promise<AutovacuumSettings> {
-  const result = await db.query<Record<string, number>>(`
+  const result = await query<Record<string, number>>(db, `
     SELECT
       current_setting('autovacuum_vacuum_threshold')::float8 AS vacuum_threshold,
       current_setting('autovacuum_vacuum_scale_factor')::float8 AS vacuum_scale_factor,
@@ -131,7 +132,7 @@ interface ActivityRow {
  * Call flushStatistics first, in an earlier query, to include recent writes.
  */
 export async function readTableActivity(db: PGliteInterface): Promise<TableActivity[]> {
-  const result = await db.query<ActivityRow>(`
+  const result = await query<ActivityRow>(db, `
     SELECT
       n.nspname AS schema_name,
       c.relname AS table_name,
@@ -143,7 +144,8 @@ export async function readTableActivity(db: PGliteInterface): Promise<TableActiv
       s.n_mod_since_analyze::float8 AS n_mod_since_analyze,
       greatest(s.last_vacuum, s.last_autovacuum) AS last_vacuum,
       greatest(s.last_analyze, s.last_autoanalyze) AS last_analyze,
-      c.reloptions
+      -- As json, which turns into a JavaScript array (or null).
+      to_json(c.reloptions) AS reloptions
     FROM pg_stat_user_tables AS s
     JOIN pg_class AS c ON c.oid = s.relid
     JOIN pg_namespace AS n ON n.oid = c.relnamespace
@@ -259,7 +261,7 @@ export async function runAutovacuum(db: PGliteInterface): Promise<AutovacuumActi
     const name = `${quoteIdentifier(table.schema)}.${quoteIdentifier(table.name)}`
     // Autovacuum does both in one pass when both are due.
     const command = assessment.vacuum ? (assessment.analyze ? `VACUUM (ANALYZE) ${name}` : `VACUUM ${name}`) : `ANALYZE ${name}`
-    await db.exec(command)
+    await query(db, command)
     actions.push({
       schema: table.schema,
       table: table.name,

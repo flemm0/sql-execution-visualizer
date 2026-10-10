@@ -7,6 +7,7 @@ import {
   type Assessment,
   type TableActivity,
 } from './autovacuum'
+import { query } from './query'
 
 /** What the schema browser shows: the database, its schemas, and their tables. */
 export interface DatabaseInfo {
@@ -64,8 +65,8 @@ const HIDDEN_SCHEMAS_SQL = `
 
 /** The database's schemas, tables, columns and indexes, each list sorted by name (columns in table order). */
 export async function loadCatalog(db: PGliteInterface): Promise<DatabaseInfo> {
-  const database = await db.query<{ name: string }>('SELECT current_database() AS name')
-  const schemaRows = await db.query<{ name: string }>(`
+  const database = await query<{ name: string }>(db, 'SELECT current_database() AS name')
+  const schemaRows = await query<{ name: string }>(db, `
     SELECT n.nspname AS name FROM pg_namespace AS n WHERE ${HIDDEN_SCHEMAS_SQL} ORDER BY n.nspname
   `)
 
@@ -116,7 +117,7 @@ interface TableRow {
 }
 
 async function listTables(db: PGliteInterface): Promise<TableInfo[]> {
-  const result = await db.query<TableRow>(`
+  const result = await query<TableRow>(db, `
     SELECT
       n.nspname AS schema_name,
       t.relname AS table_name,
@@ -150,7 +151,7 @@ interface ColumnRow {
 }
 
 async function listColumns(db: PGliteInterface) {
-  const result = await db.query<ColumnRow>(`
+  const result = await query<ColumnRow>(db, `
     SELECT
       n.nspname AS schema_name,
       t.relname AS table_name,
@@ -180,7 +181,7 @@ interface IndexRow {
 }
 
 async function listIndexes(db: PGliteInterface) {
-  const result = await db.query<IndexRow>(`
+  const result = await query<IndexRow>(db, `
     SELECT
       n.nspname AS schema_name,
       t.relname AS table_name,
@@ -204,6 +205,6 @@ async function listIndexes(db: PGliteInterface) {
 
 /** e.g. "PostgreSQL 18.3" */
 export async function postgresVersion(db: PGliteInterface) {
-  const result = await db.query<{ version: string }>('SELECT version()')
+  const result = await query<{ version: string }>(db, 'SELECT version()')
   return result.rows[0].version.split(' on ')[0]
 }

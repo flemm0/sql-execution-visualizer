@@ -1,4 +1,5 @@
 import type { PGliteInterface } from '@electric-sql/pglite'
+import type { PGliteWorker } from '@electric-sql/pglite/worker'
 import type { EditorView } from '@codemirror/view'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { AutovacuumToasts, type AutovacuumNotice } from './autovacuum/AutovacuumToasts'
@@ -17,7 +18,7 @@ import { SchemaBrowser } from './schema/SchemaBrowser'
 import { readSetting, saveSetting } from './storage'
 
 // Started once per page load: in development, React's StrictMode runs effects twice.
-let connection: Promise<PGliteInterface> | undefined
+let connection: Promise<PGliteWorker> | undefined
 function getDatabase() {
   connection ??= connectToDatabase()
   return connection
@@ -70,8 +71,9 @@ export default function App() {
   const [state, setState] = useState<State>({ status: 'loading' })
   const [run, setRun] = useState<RunState>({ status: 'idle' })
   const editorView = useRef<EditorView | null>(null)
-  // True from a run's results until autovacuum and the catalog reload after it are done.
-  // Run stays disabled meanwhile, so two things never query the database at once (ADR 0020).
+  // True from a run's results until autovacuum, the catalog reload and the save after it are done.
+  // Run stays disabled meanwhile, so two things never query the database at once (ADR 0020),
+  // and once it's enabled again, the run's changes are saved (ADR 0023).
   const [tidyingUp, setTidyingUp] = useState(false)
   const [autovacuumOn, setAutovacuumOn] = useState(() => readSetting(AUTOVACUUM_KEY) !== 'off')
   const [notices, setNotices] = useState<AutovacuumNotice[]>([])
@@ -130,6 +132,7 @@ export default function App() {
     } catch {
       // Refreshed after the next statement instead.
     }
+    await save(db)
     setTidyingUp(false)
   }
 
@@ -152,7 +155,10 @@ export default function App() {
     setState({ status: 'resetting' })
     setRun({ status: 'idle' })
     try {
-      await resetDatabase(await getDatabase())
+      const db = await getDatabase()
+      await resetDatabase(db)
+      // Saved only once it's complete, so a reset cut short by a reload leaves the old database.
+      await save(db)
       setState({ status: 'ready', overview: await loadOverview() })
     } catch (error) {
       setState({ status: 'error', message: String(error) })
@@ -288,6 +294,19 @@ export default function App() {
 async function autovacuum(db: PGliteInterface): Promise<AutovacuumAction[]> {
   if (await inTransaction(db)) return []
   return runAutovacuum(db)
+}
+
+/**
+ * Saves the database to IndexedDB and waits until it's done. The app's queries
+ * don't save on their own, so a read never waits for a save (ADR 0023).
+ */
+async function save(db: PGliteWorker) {
+  try {
+    await db.syncToFs()
+  } catch (error) {
+    // The run's results stand; the next run's save tries again.
+    console.error('Saving the database failed:', error)
+  }
 }
 
 function planPlaceholder(run: RunState) {
