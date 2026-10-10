@@ -14,6 +14,7 @@ import { Workspace } from './layout/Workspace'
 import { PlanTree } from './plan/PlanTree'
 import { ResultsPane } from './results/ResultsPane'
 import { SchemaBrowser } from './schema/SchemaBrowser'
+import { Visualization } from './visualization/Visualization'
 import { readSetting, saveSetting } from './storage'
 
 // Started once per page load: in development, React's StrictMode runs effects twice.
@@ -48,7 +49,8 @@ type State =
 type RunState =
   | { status: 'idle' }
   | { status: 'running' }
-  | { status: 'done'; results: StatementResult[]; sql: string }
+  /** `id` counts runs, so each run's visualization starts a fresh player. */
+  | { status: 'done'; results: StatementResult[]; sql: string; id: number }
 
 /** Where the editor's text is kept between visits (localStorage, like the other UI settings). */
 const EDITOR_TEXT_KEY = 'editor-text'
@@ -80,6 +82,7 @@ export default function App() {
   const [emptyCacheOn, setEmptyCacheOn] = useState(() => readSetting(EMPTY_CACHE_KEY) !== 'off')
   const [notices, setNotices] = useState<AutovacuumNotice[]>([])
   const nextNoticeId = useRef(1)
+  const nextRunId = useRef(1)
 
   // useCallback keeps the same function between renders, so each notice's
   // timer (which depends on it) isn't restarted every time App renders.
@@ -112,7 +115,7 @@ export default function App() {
     try {
       const options = { emptyCache: emptyCacheOn }
       const results = mode === 'all' ? await runAll(db, sql, options) : await runStatementAt(db, sql, cursor, options)
-      setRun({ status: 'done', results, sql })
+      setRun({ status: 'done', results, sql, id: nextRunId.current++ })
       setTidyingUp(true)
     } catch (error) {
       // Postgres errors are results; this is the database connection itself failing.
@@ -270,9 +273,16 @@ export default function App() {
             )
           }
           visualization={
-            <Placeholder comingSoon>
-              Index pages, shared buffers and heap pages, animated one step at a time as the query runs.
-            </Placeholder>
+            run.status === 'done' && lastQuery?.plan && lastQuery.replay?.status === 'replayed' ? (
+              <Visualization
+                key={run.id}
+                plan={lastQuery.plan}
+                trace={lastQuery.replay.trace}
+                validation={lastQuery.replay.validation}
+              />
+            ) : (
+              <Placeholder>{visualizationPlaceholder(run, lastQuery)}</Placeholder>
+            )
           }
           results={
             run.status === 'done' && run.results.length > 0 ? (
@@ -330,6 +340,15 @@ function planPlaceholder(run: RunState) {
   return 'Run a SELECT to see the plan Postgres picks, with estimated and actual rows for each step.'
 }
 
+function visualizationPlaceholder(run: RunState, lastQuery: RowsResult | undefined) {
+  if (run.status === 'running') return 'Running…'
+  const replay = lastQuery?.replay
+  if (replay?.status === 'unsupported') return `${replay.reason} The plan and the result are still real.`
+  if (replay?.status === 'failed') return `The replay failed, so there’s nothing to animate: ${replay.message}`
+  if (run.status === 'done') return 'The last run had no query to animate. Run a SELECT to watch Postgres run it.'
+  return 'Run a SELECT to watch Postgres run it, one step at a time: the index pages it walks, the pages it reads into shared buffers, and the rows it checks and sends to the result.'
+}
+
 function resultsPlaceholder(run: RunState) {
   if (run.status === 'running') return 'Running…'
   if (run.status === 'done') return 'Nothing to run: the editor has no statements.'
@@ -344,11 +363,10 @@ function Banner({ accent, testId, children }: { accent: string; testId: string; 
   )
 }
 
-function Placeholder({ comingSoon = false, children }: { comingSoon?: boolean; children: ReactNode }) {
+function Placeholder({ children }: { children: ReactNode }) {
   return (
     <div className="p-4 text-fg-muted">
       <p>{children}</p>
-      {comingSoon && <p className="mt-1 text-xs uppercase tracking-wide">Coming soon</p>}
     </div>
   )
 }

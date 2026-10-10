@@ -112,10 +112,14 @@ Engine-specific code (Postgres runner, inspector, replayers) sits behind a `Data
 - The number of rows sent to the result equals the real result's.
 - The rows sent to the result have the same values, in the same order, as the result rows the results pane shows (up to 1,000). The values are read from Postgres by `ctid`, using the plan's own output expressions. With more rows, the count covers the rest, and a note says so ([ADR 0024](decisions/0024-seq-scan-trace-per-page.md)).
 
-It also passes on notes for what it can't check, e.g. a table big enough for Postgres to read it through a ring buffer. On mismatch the plan pane opens the list of checks with the failed ones marked (a warning banner over the animation comes with the visualization), and the animation still plays. Every example query has an automated test asserting a match.
+It also passes on notes for what it can't check, e.g. a table big enough for Postgres to read it through a ring buffer. On mismatch the plan pane opens the list of checks with the failed ones marked, a warning banner shows over the animation, and the animation still plays. Every example query has an automated test asserting a match.
 
 ### Player (main thread)
-Holds the trace and the playback position. Supports play/pause, step forward and back, a timeline scrubber, speed control, and "jump to next row / page / plan node".
+Holds the trace and the playback position. Supports play/pause, step forward and back, a timeline scrubber, speed control, and (M3) "jump to next row / page / plan node". The decisions are in [ADR 0027](decisions/0027-player-steps-and-state.md).
+
+- **Steps** (`src/player/playback.ts`): one step is one trace event. `stateAt(trace, nodes, position)` rebuilds what the visualization shows after the first `position` events, from the start of the trace: hit and read counters, the pages the query has asked for, the current search down the index and the entries matched on its leaf, the current heap page and its rows, the table's pages touched so far, and rows sent to the result. Then it writes the caption for the last event only, from the event and the state after it. About 18 ms at the end of a 200,000-row Seq Scan's trace, in Node.
+- **Playback** (`src/player/usePlayer.ts`): a React hook with the position, play/pause and the speed (remembered in `localStorage`). A timer adds one step at a time; at instant speed it goes straight to the end. A run autoplays. The visualization pane is keyed by run, so each run starts a new player at step 0.
+- **Visualization** (`src/visualization/`): draws the state in three zones (index, shared buffers, heap), the caption and the controls ([UX.md](UX.md#visualization)).
 
 - **Condensing.** A condensing pass groups repetitive runs of real events into **stretches** so a run fits the ~30 s budget at normal speed ([ADR 0005](decisions/0005-realistic-data-and-30s-budget.md)).
 - **Lazy detail.** Stretch summaries carry exact counts. Their full detail is computed only when a stretch is expanded. This keeps a 200,000-row Seq Scan cheap.
