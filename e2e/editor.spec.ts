@@ -51,6 +51,17 @@ test('a SQL error shows Postgres’s message and position, and Run all stops the
   await expect(editorContent(page)).toContainText('SELECT Xnope FROM scratch')
 })
 
+test('inside a transaction block, a failed query shows its own error, not "transaction is aborted"', async ({ page }) => {
+  await runSql(page, 'BEGIN;\nSELECT * FROM nope;')
+
+  await expect(statusLines(page)).toHaveCount(2)
+  await expect(statusLines(page).nth(1)).toHaveAttribute('data-status', 'error')
+  const error = page.getByTestId('sql-error')
+  await expect(error).toContainText('ERROR: relation "nope" does not exist')
+  await expect(error).not.toContainText('current transaction is aborted')
+  await expect(error.getByRole('button', { name: '(line 2, column 15)' })).toBeVisible()
+})
+
 test('Postgres’s notices, DETAIL and HINT are shown', async ({ page }) => {
   await runSql(page, 'DROP TABLE IF EXISTS never_created;\nINSERT INTO categories VALUES (1, \'x\', \'x\');')
   await expect(page.getByTestId('sql-notice')).toHaveText('NOTICE: table "never_created" does not exist, skipping')

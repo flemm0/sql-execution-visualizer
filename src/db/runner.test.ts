@@ -1,8 +1,15 @@
 import type { PGlite } from '@electric-sql/pglite'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createDatabase } from './createDatabase'
 import { cachedBlocks, findRelations, snapshotCache } from './inspector'
-import { MAX_DISPLAYED_ROWS, runAll, runStatementAt, type RunOptions, type StatementResult } from './runner'
+import {
+  MAX_DISPLAYED_ROWS,
+  runAll,
+  runStatementAt,
+  transactionStatus,
+  type RunOptions,
+  type StatementResult,
+} from './runner'
 import { seedDatabase } from './seed'
 
 let db: PGlite
@@ -233,5 +240,49 @@ describe('errors', () => {
     const exists = await db.query(`SELECT to_regclass('t1') IS NOT NULL AS found`)
     expect(exists.rows).toEqual([{ found: true }])
     await db.exec('DROP TABLE t1')
+  })
+})
+
+describe('errors inside a transaction block', () => {
+  // Even when a test fails partway, leave no transaction open for the next one.
+  afterEach(async () => {
+    if ((await transactionStatus(db)) !== 'I') await db.exec('ROLLBACK')
+  })
+
+  it('carry the real message and position, not "current transaction is aborted"', async () => {
+    const sql = 'BEGIN;\nSELECT * FROM nope;'
+    const results = await runAll(db, sql)
+    expect(results.map((result) => result.status)).toEqual(['done', 'error'])
+    const error = expectStatus(results[1], 'error')
+    expect(error.message).toBe('relation "nope" does not exist')
+    expect(error.code).toBe('42P01')
+    expect(error.position).toBe(sql.indexOf('nope'))
+    // The statement itself failed, so the transaction has too, as in psql.
+    expect(await transactionStatus(db)).toBe('E')
+  })
+
+  it('carry the real message for an error only execution reaches', async () => {
+    const results = await runAll(db, 'BEGIN;\nSELECT 1 / (id - 4242) FROM orders;')
+    const error = expectStatus(results[1], 'error')
+    expect(error.message).toBe('division by zero')
+  })
+
+  it('leave the transaction usable once the visitor rolls back to their savepoint', async () => {
+    const first = await runAll(db, 'BEGIN;\nCREATE TABLE kept (n int);\nSAVEPOINT before_error;\nSELECT * FROM nope;')
+    expect(first.map((result) => result.status)).toEqual(['done', 'done', 'done', 'error'])
+
+    const second = await runAll(db, 'ROLLBACK TO SAVEPOINT before_error;\nSELECT count(*) AS n FROM kept;')
+    expect(second.map((result) => result.status)).toEqual(['done', 'rows'])
+    // A query in a transaction block still gets its plan.
+    expect(expectStatus(second[1], 'rows').plan?.root.nodeType).toBe('Aggregate')
+    expect(await transactionStatus(db)).toBe('T')
+  })
+
+  it('in a transaction block that already failed, report it as Postgres does', async () => {
+    await runAll(db, 'BEGIN;\nSELECT * FROM nope;')
+    const [result] = await runAll(db, 'SELECT 1;')
+    expect(expectStatus(result, 'error').message).toBe(
+      'current transaction is aborted, commands ignored until end of transaction block',
+    )
   })
 })

@@ -182,29 +182,54 @@ export async function runStatement(
  * Returns null if Postgres rejects any of it. Running the statement itself
  * then reports the error, with positions that match the editor text rather
  * than the EXPLAIN prefix.
+ *
+ * Inside a transaction block, a failed step would abort the visitor's
+ * transaction, and the statement would then fail only with "current
+ * transaction is aborted". So there the steps run inside a savepoint, which is
+ * rolled back if one of them fails. In a transaction block that has already
+ * failed, a savepoint can't be made; the steps fail as the statement will.
  */
 async function explainQuery(
   db: PGliteInterface,
   sql: string,
   options: RunOptions,
 ): Promise<{ plan: Plan; cache: QueryCache } | null> {
+  const useSavepoint = (await transactionStatus(db)) === 'T'
+  if (useSavepoint) await query(db, `SAVEPOINT ${EXPLAIN_SAVEPOINT}`)
   try {
-    const planOnly = `EXPLAIN (BUFFERS, SUMMARY, VERBOSE, FORMAT JSON) ${sql}`
-    let planned = await explainJson(db, planOnly)
-    const relations = await findRelations(db, tablesInPlan(planned))
-    const emptied = options.emptyCache === true
-    if (emptied) {
-      await evictRelations(db, relations)
-      planned = await explainJson(db, planOnly)
-    }
-    const before = await snapshotCache(db, relations)
-    const plan = parsePlan(await explainJson(db, `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) ${sql}`))
-    // EXPLAIN ANALYZE plans the query again, but finds everything planning
-    // needs already cached. Report the planning that did the reading instead.
-    return { plan: { ...plan, ...parsePlanning(planned) }, cache: { relations, emptied, before } }
+    const explained = await explainSteps(db, sql, options)
+    if (useSavepoint) await query(db, `RELEASE SAVEPOINT ${EXPLAIN_SAVEPOINT}`)
+    return explained
   } catch {
+    if (useSavepoint) {
+      await query(db, `ROLLBACK TO SAVEPOINT ${EXPLAIN_SAVEPOINT}; RELEASE SAVEPOINT ${EXPLAIN_SAVEPOINT}`)
+    }
     return null
   }
+}
+
+/** A name unlikely to be one of the visitor's own savepoints. */
+const EXPLAIN_SAVEPOINT = 'sql_visualizer_explain'
+
+/** The steps explainQuery describes. Throws Postgres's error if one fails. */
+async function explainSteps(
+  db: PGliteInterface,
+  sql: string,
+  options: RunOptions,
+): Promise<{ plan: Plan; cache: QueryCache }> {
+  const planOnly = `EXPLAIN (BUFFERS, SUMMARY, VERBOSE, FORMAT JSON) ${sql}`
+  let planned = await explainJson(db, planOnly)
+  const relations = await findRelations(db, tablesInPlan(planned))
+  const emptied = options.emptyCache === true
+  if (emptied) {
+    await evictRelations(db, relations)
+    planned = await explainJson(db, planOnly)
+  }
+  const before = await snapshotCache(db, relations)
+  const plan = parsePlan(await explainJson(db, `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) ${sql}`))
+  // EXPLAIN ANALYZE plans the query again, but finds everything planning
+  // needs already cached. Report the planning that did the reading instead.
+  return { plan: { ...plan, ...parsePlanning(planned) }, cache: { relations, emptied, before } }
 }
 
 /** Runs an EXPLAIN (FORMAT JSON) and returns its JSON. */
@@ -214,17 +239,26 @@ async function explainJson(db: PGliteInterface, sql: string): Promise<unknown> {
 }
 
 /**
- * Whether the session is inside a transaction block (after BEGIN, before
- * COMMIT or ROLLBACK), including one that failed. Postgres reports this at
- * the end of every reply; an empty query asks for it without doing anything.
+ * Where the session is, as Postgres reports it at the end of every reply:
+ * - 'I': idle, not inside a transaction block
+ * - 'T': inside a transaction block (after BEGIN, before COMMIT or ROLLBACK)
+ * - 'E': inside a transaction block that failed, waiting for ROLLBACK
+ *
+ * An empty query asks for it without doing anything.
  */
-export async function inTransaction(db: PGliteInterface): Promise<boolean> {
-  let status = 'I'
+export async function transactionStatus(db: PGliteInterface): Promise<TransactionStatus> {
+  let status: TransactionStatus = 'I'
   for (const message of await sendQuery(db, '')) {
-    // 'I' idle, 'T' in a transaction block, 'E' in a failed one.
-    if (message instanceof messages.ReadyForQueryMessage) status = message.status
+    if (message instanceof messages.ReadyForQueryMessage) status = message.status as TransactionStatus
   }
-  return status !== 'I'
+  return status
+}
+
+export type TransactionStatus = 'I' | 'T' | 'E'
+
+/** Whether the session is inside a transaction block, including one that failed. */
+export async function inTransaction(db: PGliteInterface): Promise<boolean> {
+  return (await transactionStatus(db)) !== 'I'
 }
 
 type SimpleQueryReply =
