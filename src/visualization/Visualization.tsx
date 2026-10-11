@@ -10,7 +10,7 @@ import {
   type PageMark,
   type PlaybackState,
 } from '../player/playback'
-import { usePlayer } from '../player/usePlayer'
+import type { Player } from '../player/usePlayer'
 import type { PageRef, Trace, TraceRelation } from '../replay/trace'
 import { allNodes, type Validation } from '../replay/validate'
 import { BtreeView } from './BtreeView'
@@ -27,16 +27,16 @@ interface VisualizationProps {
   plan: Plan
   trace: Trace
   validation: Validation
+  /** App's player, with this trace loaded: the results pane follows the same step. */
+  player: Player
 }
 
 /**
  * The visualization pane (docs/UX.md#visualization): a replayed query played
  * step by step through three zones, index → shared buffers → heap, with a
- * caption for each step and the player's controls. App keys it by run, so a
- * new run starts a new player.
+ * caption for each step and the player's controls.
  */
-export function Visualization({ plan, trace, validation }: VisualizationProps) {
-  const player = usePlayer(trace.events.length)
+export function Visualization({ plan, trace, validation, player }: VisualizationProps) {
   const planNodes = useMemo(() => new Map(allNodes(plan.root).map((node) => [node.id, node])), [plan])
   const nodeInfo = useMemo(() => {
     const info = new Map<number, NodeInfo>()
