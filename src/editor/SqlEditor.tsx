@@ -1,3 +1,5 @@
+import { acceptCompletion } from '@codemirror/autocomplete'
+import { indentWithTab } from '@codemirror/commands'
 import { PostgreSQL, sql, type SQLNamespace } from '@codemirror/lang-sql'
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { Compartment, EditorSelection, Prec } from '@codemirror/state'
@@ -6,6 +8,7 @@ import { tags } from '@lezer/highlight'
 import { basicSetup } from 'codemirror'
 import { useEffect, useRef, type RefObject } from 'react'
 import type { DatabaseInfo } from '../db/catalog'
+import { columnCompletionSource } from './columnCompletion'
 
 export type RunMode = 'statement' | 'all'
 
@@ -24,7 +27,9 @@ interface SqlEditorProps {
 
 /**
  * The SQL editor: CodeMirror 6 with Postgres syntax, and completion of
- * keywords, schemas, tables and columns from the live catalog.
+ * keywords, schemas, tables and columns from the live catalog. Tab accepts an
+ * open suggestion, and otherwise indents (Shift+Tab dedents); Esc then Tab
+ * moves focus out of the editor.
  *
  * CodeMirror manages its own DOM and state, so React only gives it an empty
  * <div> to fill (in an effect) and tells it about new props through
@@ -66,6 +71,10 @@ export function SqlEditor({ initialText, database, onRun, onChange, viewRef }: S
         ),
         // Line numbers, undo history, bracket matching, completion pop-ups and the usual key bindings.
         basicSetup,
+        // basicSetup leaves Tab unbound so keyboard users can tab past the editor.
+        // Here Tab first accepts an open suggestion; if none is open, acceptCompletion
+        // returns false and indentWithTab runs. CodeMirror's Esc-then-Tab still leaves the editor.
+        keymap.of([{ key: 'Tab', run: acceptCompletion }, indentWithTab]),
         language.current.of(sqlLanguage(null)),
         syntaxHighlighting(highlightStyle),
         editorTheme,
@@ -99,7 +108,8 @@ export function selectInEditor(view: EditorView, from: number, to = from) {
 
 /**
  * Postgres syntax, plus the catalog as completions: "orders" completes
- * anywhere (public is the default schema), and "orders." completes its columns.
+ * anywhere (public is the default schema), "orders." completes its columns,
+ * and the columns of the tables the statement names complete on their own.
  */
 function sqlLanguage(database: DatabaseInfo | null) {
   const schema: SQLNamespace = {}
@@ -108,7 +118,9 @@ function sqlLanguage(database: DatabaseInfo | null) {
     for (const table of namespace.tables) tables[table.name] = table.columns.map((column) => column.name)
     schema[namespace.name] = tables
   }
-  return sql({ dialect: PostgreSQL, schema, defaultSchema: 'public', upperCaseKeywords: true })
+  const support = sql({ dialect: PostgreSQL, schema, defaultSchema: 'public', upperCaseKeywords: true })
+  // A second completion source for SQL; CodeMirror merges its suggestions with the SQL support's own.
+  return [support, support.language.data.of({ autocomplete: columnCompletionSource(database) })]
 }
 
 /*
