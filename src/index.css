@@ -93,7 +93,37 @@
     @apply rounded-md border border-line bg-surface-2 px-3 py-1 text-fg hover:border-line-strong disabled:opacity-50;
   }
 
+  /* A buffer slot the step just used: a page arriving from disk, or a hit flashing. */
+  .slot-read {
+    animation: slot-read 300ms ease-out;
+  }
+
+  .slot-hit {
+    animation: slot-hit 300ms ease-out;
+  }
+
   .icon-btn {
-    @apply grid size-7 place-items-center rounded-md text-fg-muted hover:bg-surface-2 hover:text-fg;
+    @apply grid size-7 place-items-center rounded-md text-fg-muted hover:bg-surface-2 hover:text-fg disabled:opacity-40;
+  }
+}
+
+@keyframes slot-read {
+  from {
+    transform: translateY(-6px);
+    opacity: 0;
+  }
+}
+
+@keyframes slot-hit {
+  from {
+    background-color: var(--border-strong);
+  }
+}
+
+/* With the operating system's "reduce motion" setting on, nothing moves (docs/UX.md#defaults). */
+@media (prefers-reduced-motion: reduce) {
+  .slot-read,
+  .slot-hit {
+    animation: none;
   }
 }

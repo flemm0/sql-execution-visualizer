@@ -63,23 +63,33 @@ Three zones show the path a page takes: **disk → shared buffers → executor**
      read from disk into a buffer. Row 4 is visible → sent to the result."
 ```
 
-- **Index zone:** the B-tree path actually walked (root → internal → leaf), plus neighboring leaf pages when the scan walks sideways. Keys are decoded real values.
-- **Shared buffers zone:** cache slots. A miss animates the page moving from disk into a slot; a hit flashes the slot. Running hit/read counters.
-- **Heap zone:** the page being read in detail, plus a mini-map of the whole table with touched pages highlighted.
-- **Captions:** every step has a one-sentence plain-language caption.
-- **Show internals:** reveals line pointers, offsets, and tuple headers (`xmin`/`xmax`, infomask), plus visibility-map bits.
+- **Node line:** above the zones, the plan node working now, whether it's active or done, and the rows it has sent to the result so far against the planner's estimate.
+- **Index zone:** the B-tree as the current search walks it, drawn the way textbooks draw one ([ADR 0028](decisions/0028-index-pages-in-the-trace.md)). One level per row, the root at the top. Each page is a row of its real keys (as Postgres writes them), with a pointer in each gap between two keys leading down to the child page holding the keys between them. Postgres stores each child's pointer with the lowest key the child can hold, and the first pointer with no key (minus infinity), so the pointer in the gap after a key is the downlink with that key. The pointer the search followed is sky, with a sky arrow down to the child page.
+  - **Fitting real pages:** a page holds hundreds of keys, so it shows the few around the one that matters (up to three each side, fewer when the zone is narrow), with "…N…" counts for the rest. Long keys are cut with "…" (the full key on hover). Columns a downlink dropped (suffix truncation) show as `−∞`.
+  - **The rest of a level:** the parent's other children show as faint dashed boxes left and right ("11 pages", "125 pages"), with dashed lines from the parent's neighboring pointers.
+  - **The leaf:** its entries around the one matching now (highlighted) or the latest match; earlier matches are sky, and entries marked dead (before the query, or by it) are struck through. An amber arrow goes down from the latest match to the heap row it points at ("heap row (50,3)").
+  - **Moving right:** the leaves a scan reads along a level sit side by side, linked by arrows; earlier ones are small (their first and last keys), with a count for any left out between them, and the last is drawn in full.
+  - Each page is labelled above (`idx p13 · leaf`); the page the step is on is outlined in sky and scrolled into view. Above the tree: which search down from the root this is, how many entries matched on the leaf, and how many the scan marked dead. High keys aren't drawn (textbook B-trees don't have them); show internals will add them (M3). A scan that reads no index has no index zone.
+- **Shared buffers zone:** one slot per page the query has asked for, labelled `i57` (index page) or `h212` (heap page), in sky or amber, the latest 40 shown. A read animates the page arriving from disk into its slot; a hit flashes the slot. Running hit and read counters, the pages used so far, and how many were already cached.
+- **Heap zone:** a mini-map of the whole table, one square per page (several pages per square for tables over 600 pages): pages the query has been through in amber, pages that gave rows to the result in emerald, the current page outlined. Under it, the page being read now: for a Seq Scan, its visible and matching row counts; then its latest rows (6 at most), each marked as passing, sent to the result (with its result row number, emerald), filtered out (red) or not visible. A row an UPDATE moved within the page shows the version the query saw.
+- **Captions:** every step has a one-sentence plain-language caption, written from the step's trace event ("Index page 57 isn’t in shared buffers, so it’s read from disk into a buffer."). Captions spell out "index page 57" and "heap page 212"; compact labels use `idx p57` and `h212`.
+- **Mismatch warning:** when the replay doesn't match Postgres, a red-edged banner over the zones says so and points to the checks in the plan pane; the animation still plays.
+- **Nothing to animate:** a query that can't be replayed shows why in the pane ("Animation isn’t available yet for Aggregate."), as the plan pane does.
+- Still to come: the plan tree highlighting the active node (M2), show internals, idle mode and glossary tooltips (M3).
+- **Show internals:** reveals line pointers, offsets, and tuple headers (`xmin`/`xmax`, infomask), plus visibility-map bits, and each B-tree page's high key.
 - **Idle mode:** with no query playing, the pane browses any table's or index's pages.
 - Index and heap page numbers are separate (different files); labels always say which (`idx p57`, `heap page 212`).
 
 ## Playback
 
 - The full trace is computed first, then played ([ADR 0007](decisions/0007-precompute-then-play.md)).
-- **Controls:** play/pause, step back/forward, timeline scrubber, speed (≈1–60 steps/s, or instant), and jump to the next row emitted / page read / plan node.
-- **One step = one action:**
-  - visit an index page
-  - match an index entry
+- **Controls:** to the start, step back, play/pause, step forward, to the end, a timeline scrubber, speed (1, 3, 10, 30 or 60 steps/s, or instant; 30 by default, remembered in that browser), and which step is showing ("step 120 / 3,410"). Stepping pauses playback; the scrubber keeps playing from where it's dropped. Play at the last step starts over. Jump to the next row emitted / page read / plan node comes in M3.
+- **One step = one action**, one trace event ([ADR 0027](decisions/0027-player-steps-and-state.md)):
+  - a plan node starts or finishes
+  - start a search down the index, visit an index page
+  - match an index entry, mark entries dead
   - request a page (hit or read)
-  - examine a row
+  - go through a heap page (a Seq Scan), or fetch and check a row (an Index Scan)
   - emit a row
 - **~30 s budget at normal speed.** Early pages play row by row, then the player moves a page at a time ("page 37: 150 rows checked, 2 matched"). Matching rows still flash individually. Every condensed stretch can be expanded and stepped through in full ([ADR 0005](decisions/0005-realistic-data-and-30s-budget.md)).
 - **Empty-cache toggle:** the **Empty cache** checkbox in the editor toolbar ("start with an empty cache") is on by default, so before each query its tables' and indexes' pages are evicted and every page is first read from disk. Turn it off and rerun to see buffer hits. The choice is remembered in that browser.
@@ -90,7 +100,7 @@ Three zones show the path a page takes: **disk → shared buffers → executor**
 - `Cmd/Ctrl+Enter` (or **Run**) runs the statement under the cursor; `Shift+Cmd/Ctrl+Enter` (or **Run all**) runs the whole editor in order and stops at the first error.
 - **Results pane:** one status line per statement ("SELECT: 3 rows, 2 ms", "CREATE INDEX: done, 18 ms", "UPDATE: 4 rows"), Postgres's notices under it, then the rows of the last statement that returned any. Values appear exactly as Postgres prints them (dates as `2024-02-29`, booleans as `t`/`f`), and NULL as a dimmed *NULL*.
 - **Plan pane:** the plan of the last query in the run: each node's heading as in text EXPLAIN, actual vs. estimated rows, shared-buffer hits and reads, and its conditions (Index Cond, Filter, Rows Removed by Filter, …), plus planning time and the pages planning found cached or read (system catalogs, index probes; not part of any node's counts), and execution time. Under it, whether the replay matches Postgres ("✓ Replay matches Postgres · 6 checks", which opens to the list of checks, each with Postgres's number and the replay's), or "✗ Replay doesn’t match Postgres" with the list open and the failed checks in red, or why the query can't be animated yet ("Animation isn’t available yet for Aggregate.", "Animation isn’t available yet for backward index scans."). A run with no query leaves a note saying so.
-- **SELECT:** the plan appears immediately and the animation autoplays (a setting can switch autoplay off; then it loads paused at step 0). Results fill in as rows are emitted; **Skip to end** reveals the final result instantly. (Until the animation exists, the plan and the full result appear together.)
+- **SELECT:** the plan appears immediately and the animation autoplays (a setting can switch autoplay off; then it loads paused at step 0). Results fill in as rows are emitted; **Skip to end** reveals the final result instantly. (For now the full result appears at once, while the animation plays; filling it in as rows are emitted comes next in M2. The autoplay setting is still to come: every run autoplays.)
 - **Other statements:** a status line; the schema browser refreshes; no plan and no animation in v1.
 - **SQL errors:** Postgres's message in the results pane, with its DETAIL and HINT, and the line and column it points at; clicking those puts the cursor there.
 - **Autovacuum:** after each run (not inside an open transaction), tables over Postgres's autovacuum thresholds are vacuumed and/or analyzed. Each one gets a toast in the bottom-right corner, saying which counter crossed which threshold ("autovacuum: analyzed orders / 5,051 rows changed since the last analyze (threshold 5,050)"). Toasts close after 10 seconds or with ✕. The **Autovacuum** checkbox in the editor toolbar turns the simulator off, to study stale statistics; the choice is remembered in that browser. Run stays disabled until autovacuum and the schema refresh are done.

@@ -165,7 +165,48 @@ export type TraceEvent =
   | HeapTupleEvent
   | RowEmitEvent
 
+/**
+ * One item of an index page, as the scan found it: on a leaf page, an entry
+ * (a key and the rows it points at); on a page above, a downlink (a key and
+ * the child page holding keys from it up to the next downlink's key).
+ */
+export interface IndexItem {
+  /** Its offset on the page. */
+  offset: number
+  /**
+   * Its key, one value per key column, as Postgres writes them (null for
+   * NULL). A downlink can keep fewer columns than the index has (the ones it
+   * drops count as minus infinity), and a page's first downlink keeps none: it
+   * stands for minus infinity.
+   */
+  key: (string | null)[]
+  /** For a downlink, its child page's number; null for an entry. */
+  child: number | null
+  /** For an entry, how many rows it points at (more than one for a posting list); 0 for a downlink. */
+  rows: number
+  /** Marked dead before the query ran: scans skip it. */
+  dead: boolean
+}
+
+/** An index page the trace goes through, with its items as the scan found them before the query ran. */
+export interface IndexPageContents {
+  relation: number
+  block: number
+  /** 0 for a leaf page, one more for each level above. */
+  level: number
+  /** Whether it's the index's root page. */
+  isRoot: boolean
+  /** The next page to the right on the same level; null for the rightmost. */
+  next: number | null
+  /** The upper bound of the keys on the page (in as many columns as it keeps); null on the rightmost page of a level. */
+  highKey: (string | null)[] | null
+  /** Its downlinks or entries, in order (the high key apart). */
+  items: IndexItem[]
+}
+
 export interface Trace {
   relations: TraceRelation[]
   events: TraceEvent[]
+  /** Every index page the events visit, with its items, in the order first visited. */
+  indexPages: IndexPageContents[]
 }

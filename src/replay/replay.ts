@@ -6,7 +6,7 @@ import { quoteIdentifier } from '../db/sql'
 import { SharedBuffers } from './buffers'
 import { replayIndexScan, walkIndexScan, type IndexWalk } from './indexScan'
 import { scanPages, seqScanEvents } from './seqScan'
-import type { RowRef, Trace, TraceEvent } from './trace'
+import type { IndexPageContents, RowRef, Trace, TraceEvent } from './trace'
 import { Unsupported } from './unsupported'
 import { allNodes, validate, type Validation } from './validate'
 
@@ -111,10 +111,12 @@ export async function replayQuery(db: PGliteInterface, input: ReplayInput): Prom
     let events: TraceEvent[]
     const notes: string[] = []
     let skipScan = false
+    let indexPages: IndexPageContents[] = []
     if (root.nodeType === 'Index Scan') {
       if (index === null) throw new Error(`${root.title}: no index ${root.indexName}`)
       const walk = await indexWalk(db, root, index, input.prepared)
       skipScan = walk.skipScan
+      indexPages = walk.pages
       events = await replayIndexScan(db, root, table, index, walk, buffers)
     } else {
       events = [...seqScanEvents(root, table, await scanPages(db, root, table), buffers)]
@@ -128,6 +130,7 @@ export async function replayQuery(db: PGliteInterface, input: ReplayInput): Prom
         pages: relation.pages,
       })),
       events,
+      indexPages,
     }
 
     let replayedRows: (string | null)[][] | null = null
