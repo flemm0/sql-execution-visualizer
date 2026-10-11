@@ -107,6 +107,41 @@ test('example 4 walks right along the leaves; the timeline moves to any step', a
   await expect(pages.last().locator('[data-mark="matched"]')).toHaveCount(0)
 })
 
+test('the result fills in as the animation emits rows, and Skip to end shows it whole', async ({ page }) => {
+  await openApp(page)
+  await runSql(page, 'SELECT * FROM order_items WHERE product_id = 42;')
+  const filling = page.getByTestId('rows-filling')
+  const tableRows = page.getByTestId('result-table').locator('tbody tr')
+  await control(page, 'Pause').click()
+  await control(page, 'To the start').click()
+  await expect(filling).toHaveText('Rows appear as the animation sends them to the result: 0 of 189 so far.Skip to end')
+  await expect(tableRows).toHaveCount(0)
+
+  // Halfway through, the table holds exactly the rows the visualization has sent, the latest highlighted.
+  const steps = Number((await step(page).textContent())?.match(/\/ ([\d,]+)/)?.[1].replace(/,/g, ''))
+  await page.getByRole('slider', { name: 'Timeline' }).fill(String(Math.floor(steps / 2)))
+  const sent = Number((await viz(page).getByTestId('viz-rows').textContent())?.match(/rows: (\d+) so far/)?.[1])
+  expect(sent).toBeGreaterThan(0)
+  expect(sent).toBeLessThan(189)
+  await expect(filling).toContainText(`${sent} of 189 so far`)
+  await expect(tableRows).toHaveCount(sent)
+  await expect(tableRows.last()).toHaveAttribute('data-latest', '')
+  await expect(page.locator('[data-latest]')).toHaveCount(1)
+
+  await page.getByRole('button', { name: 'Skip to end' }).click()
+  await expect(step(page)).toHaveText(`step ${steps.toLocaleString('en-US')} / ${steps.toLocaleString('en-US')}`)
+  await expect(filling).toHaveCount(0)
+  await expect(tableRows).toHaveCount(189)
+  await expect(page.locator('[data-latest]')).toHaveCount(0)
+})
+
+test('a query that can’t be animated shows its whole result at once', async ({ page }) => {
+  await openApp(page)
+  await runSql(page, 'SELECT * FROM categories ORDER BY name;')
+  await expect(page.getByTestId('result-table').locator('tbody tr')).toHaveCount(12)
+  await expect(page.getByTestId('rows-filling')).toHaveCount(0)
+})
+
 test('example 11 plays the one page of categories', async ({ page }) => {
   await openApp(page)
   await runSql(page, 'SELECT * FROM categories WHERE id = 3;')

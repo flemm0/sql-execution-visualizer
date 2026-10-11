@@ -125,6 +125,22 @@ export interface PlaybackState {
   index: IndexView | null
 }
 
+/**
+ * How many rows the first `position` events of the trace send to the result.
+ * The results pane shows that many of the real result's rows: row.emit's
+ * `resultIndex` counts up from 0, and the validator checks that the replay's
+ * rows are the result's, in the same order.
+ */
+export function resultRowsAt(trace: Trace, position: number): number {
+  const end = Math.max(0, Math.min(position, trace.events.length))
+  let rows = 0
+  for (let i = 0; i < end; i++) {
+    const event = trace.events[i]
+    if (event.type === 'row.emit' && event.resultIndex !== null) rows++
+  }
+  return rows
+}
+
 /** How many of the latest rows or entries the zones list. */
 export const SHOWN_ROWS = 6
 

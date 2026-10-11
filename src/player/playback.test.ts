@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Trace, TraceEvent } from '../replay/trace'
-import { SHOWN_ROWS, formatIndexKey, formatKey, stateAt, type NodeInfo } from './playback'
+import { SHOWN_ROWS, formatIndexKey, formatKey, resultRowsAt, stateAt, type NodeInfo } from './playback'
 
 const TABLE = 10
 const INDEX = 20
@@ -230,6 +230,28 @@ describe('the state at a step', () => {
     expect(state.caption).toBe(
       'No transaction can see the rows of 2 entries on index page 4 any more, so the scan marks them dead; later scans skip them.',
     )
+  })
+})
+
+describe('the rows sent to the result by a step', () => {
+  it('counts the rows emitted to the result, not those passed to a parent node', () => {
+    const events: TraceEvent[] = [
+      { type: 'node.start', node: 0 },
+      { type: 'row.emit', node: 1, row: row(1, 1), resultIndex: null },
+      { type: 'row.emit', node: 0, row: row(1, 1), resultIndex: 0 },
+      { type: 'row.emit', node: 1, row: row(1, 2), resultIndex: null },
+      { type: 'row.emit', node: 0, row: row(1, 2), resultIndex: 1 },
+      { type: 'node.finish', node: 0 },
+    ]
+    expect([0, 1, 2, 3, 4, 5, 6].map((position) => resultRowsAt(trace(events), position))).toEqual([0, 0, 0, 1, 1, 2, 2])
+  })
+
+  it('agrees with the state at every step, and stays within the trace', () => {
+    for (let position = 0; position <= lookup.events.length; position++) {
+      expect(resultRowsAt(lookup, position)).toBe(stateAt(lookup, nodes(), position).resultRows)
+    }
+    expect(resultRowsAt(lookup, -1)).toBe(0)
+    expect(resultRowsAt(lookup, 100)).toBe(1)
   })
 })
 

@@ -98,6 +98,8 @@ test('a statement that isn’t a query leaves the plan pane explaining why it is
 
 test('a big result shows the first 1,000 rows and the total', async ({ page }) => {
   await runSql(page, 'SELECT * FROM order_items;')
+  // The animation sends 200,582 rows one at a time; skip to its end for the whole result.
+  await page.getByRole('button', { name: 'Skip to end' }).click()
   await expect(page.getByTestId('rows-cap')).toHaveText('Showing the first 1,000 of 200,582 rows.')
   await expect(page.getByTestId('result-table').locator('tbody tr')).toHaveCount(1000)
 })

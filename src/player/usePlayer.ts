@@ -23,6 +23,8 @@ export interface Player {
   steps: number
   playing: boolean
   speed: Speed
+  /** Starts a new trace of `steps` steps from step 0, playing (autoplay); at instant speed, at its end. */
+  load: (steps: number) => void
   play: () => void
   pause: () => void
   /** Moves to a step (clamped to the trace), playing on if it was playing. */
@@ -33,14 +35,16 @@ export interface Player {
 }
 
 /**
- * Playback of a trace of `steps` steps: the position, play and pause, and the
- * speed (remembered in this browser). It starts playing at once (autoplay,
- * docs/UX.md#running-statements). The component using it is keyed by run, so
- * every run starts a fresh player at step 0.
+ * Playback of a trace: the position, play and pause, and the speed
+ * (remembered in this browser). App owns the one player, so the
+ * visualization and the results pane show the same step, and loads each
+ * run's trace into it, which starts playing at once (autoplay,
+ * docs/UX.md#running-statements).
  */
-export function usePlayer(steps: number): Player {
+export function usePlayer(): Player {
   const [speed, setSpeedState] = useState<Speed>(readSpeed)
-  const [position, setPosition] = useState(() => (speed === 'instant' ? steps : 0))
+  const [steps, setSteps] = useState(0)
+  const [position, setPosition] = useState(0)
   const [wantsToPlay, setWantsToPlay] = useState(true)
   // Playing stops by itself at the last step.
   const playing = wantsToPlay && position < steps
@@ -63,6 +67,11 @@ export function usePlayer(steps: number): Player {
     steps,
     playing,
     speed,
+    load(newSteps) {
+      setSteps(newSteps)
+      setPosition(speed === 'instant' ? newSteps : 0)
+      setWantsToPlay(true)
+    },
     play() {
       // At the end, play starts over; at instant speed, it goes straight to the end.
       if (speed === 'instant') setPosition(steps)

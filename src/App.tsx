@@ -12,7 +12,9 @@ import { SqlEditor, selectInEditor, type RunMode } from './editor/SqlEditor'
 import { APP_NAME, Header } from './layout/Header'
 import { Workspace } from './layout/Workspace'
 import { PlanTree } from './plan/PlanTree'
-import { ResultsPane } from './results/ResultsPane'
+import { resultRowsAt } from './player/playback'
+import { usePlayer } from './player/usePlayer'
+import { ResultsPane, type Filling } from './results/ResultsPane'
 import { SchemaBrowser } from './schema/SchemaBrowser'
 import { Visualization } from './visualization/Visualization'
 import { readSetting, saveSetting } from './storage'
@@ -83,6 +85,8 @@ export default function App() {
   const [notices, setNotices] = useState<AutovacuumNotice[]>([])
   const nextNoticeId = useRef(1)
   const nextRunId = useRef(1)
+  // One player for the visualization and the results pane, so both show the same step.
+  const player = usePlayer()
 
   // useCallback keeps the same function between renders, so each notice's
   // timer (which depends on it) isn't restarted every time App renders.
@@ -116,6 +120,8 @@ export default function App() {
       const options = { emptyCache: emptyCacheOn }
       const results = mode === 'all' ? await runAll(db, sql, options) : await runStatementAt(db, sql, cursor, options)
       setRun({ status: 'done', results, sql, id: nextRunId.current++ })
+      const replay = lastQueryOf(results)?.replay
+      player.load(replay?.status === 'replayed' ? replay.trace.events.length : 0)
       setTidyingUp(true)
     } catch (error) {
       // Postgres errors are results; this is the database connection itself failing.
@@ -180,10 +186,12 @@ export default function App() {
   const seedOutdated = overview !== null && overview.seed?.version !== SEED_VERSION
   const canRun = state.status === 'ready' && run.status !== 'running' && !tidyingUp
   // The last query in the run that has a plan, if any.
-  const lastQuery: RowsResult | undefined =
-    run.status === 'done'
-      ? run.results.filter((result): result is RowsResult => result.status === 'rows' && result.plan !== null).at(-1)
-      : undefined
+  const lastQuery = run.status === 'done' ? lastQueryOf(run.results) : undefined
+  const trace = lastQuery?.replay?.status === 'replayed' ? lastQuery.replay.trace : null
+  // While the animation plays, the query's result fills in as rows are emitted;
+  // at the last step it's whole (even if the replay sent fewer rows than Postgres did).
+  const filling: Filling | null =
+    lastQuery && trace && player.position < player.steps ? { result: lastQuery, rows: resultRowsAt(trace, player.position) } : null
 
   return (
     <div className="flex h-screen flex-col">
@@ -279,6 +287,7 @@ export default function App() {
                 plan={lastQuery.plan}
                 trace={lastQuery.replay.trace}
                 validation={lastQuery.replay.validation}
+                player={player}
               />
             ) : (
               <Placeholder>{visualizationPlaceholder(run, lastQuery)}</Placeholder>
@@ -286,7 +295,13 @@ export default function App() {
           }
           results={
             run.status === 'done' && run.results.length > 0 ? (
-              <ResultsPane results={run.results} sql={run.sql} onShowPosition={showPosition} />
+              <ResultsPane
+                results={run.results}
+                sql={run.sql}
+                onShowPosition={showPosition}
+                filling={filling}
+                onSkipToEnd={() => player.seek(player.steps)}
+              />
             ) : (
               <Placeholder>{resultsPlaceholder(run)}</Placeholder>
             )
@@ -309,6 +324,11 @@ export default function App() {
       <AutovacuumToasts notices={notices} onDismiss={dismissNotice} />
     </div>
   )
+}
+
+/** The last query in a run that has a plan, if any: the one the plan and visualization panes show. */
+function lastQueryOf(results: StatementResult[]): RowsResult | undefined {
+  return results.filter((result): result is RowsResult => result.status === 'rows' && result.plan !== null).at(-1)
 }
 
 /**
