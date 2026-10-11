@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Trace, TraceEvent } from '../replay/trace'
-import { SHOWN_ROWS, formatIndexKey, formatKey, resultRowsAt, stateAt, type NodeInfo } from './playback'
+import { SHOWN_ROWS, formatIndexKey, formatKey, nodeProgressAt, resultRowsAt, stateAt, type NodeInfo } from './playback'
 
 const TABLE = 10
 const INDEX = 20
@@ -252,6 +252,36 @@ describe('the rows sent to the result by a step', () => {
     }
     expect(resultRowsAt(lookup, -1)).toBe(0)
     expect(resultRowsAt(lookup, 100)).toBe(1)
+  })
+})
+
+describe('each plan node’s progress at a step', () => {
+  it('follows example 1’s one node from waiting to active to done, counting its rows', () => {
+    const at = (position: number) => nodeProgressAt(lookup, position).get(0)
+    expect(at(0)).toEqual({ status: 'waiting', rows: 0 })
+    expect(at(1)).toEqual({ status: 'active', rows: 0 })
+    expect(at(9)).toEqual({ status: 'active', rows: 0 })
+    expect(at(10)).toEqual({ status: 'active', rows: 1 })
+    expect(at(11)).toEqual({ status: 'done', rows: 1 })
+    expect(at(100)).toEqual({ status: 'done', rows: 1 })
+  })
+
+  it('keeps a parent active while its child works, and counts the rows each passes on', () => {
+    // A parent (node 0) that pulls two rows from its child (node 1) and sends one on to the result.
+    const events: TraceEvent[] = [
+      { type: 'node.start', node: 0 },
+      { type: 'node.start', node: 1 },
+      { type: 'row.emit', node: 1, row: row(1, 1), resultIndex: null },
+      { type: 'row.emit', node: 1, row: row(1, 2), resultIndex: null },
+      { type: 'node.finish', node: 1 },
+      { type: 'row.emit', node: 0, row: row(1, 2), resultIndex: 0 },
+      { type: 'node.finish', node: 0 },
+    ]
+    const at = (position: number) => Object.fromEntries(nodeProgressAt(trace(events), position))
+    expect(at(0)).toEqual({ 0: { status: 'waiting', rows: 0 }, 1: { status: 'waiting', rows: 0 } })
+    expect(at(4)).toEqual({ 0: { status: 'active', rows: 0 }, 1: { status: 'active', rows: 2 } })
+    expect(at(6)).toEqual({ 0: { status: 'active', rows: 1 }, 1: { status: 'done', rows: 2 } })
+    expect(at(7)).toEqual({ 0: { status: 'done', rows: 1 }, 1: { status: 'done', rows: 2 } })
   })
 })
 
