@@ -29,20 +29,24 @@ test('example 1 plays by itself, down the index to one row', async ({ page }) =>
   await expect(viz(page).getByTestId('viz-rows')).toHaveText('rows: 1 so far / est. 1')
   await expect(viz(page).getByTestId('viz-reads')).toHaveText('reads 3')
   await expect(viz(page).getByTestId('viz-hits')).toHaveText('hits 0')
-  // The B-tree: the root, with the downlink the search followed to the leaf, then the leaf.
-  const pages = viz(page).getByTestId('viz-index-page')
+  // The B-tree, drawn as a textbook draws one: the root, its followed pointer down to the leaf, then the leaf.
+  const pages = viz(page).getByTestId('viz-btree-page')
   await expect(pages).toHaveCount(2)
-  await expect(pages.first()).toContainText(/^idx p\d+ root · [\d,]+ downlinks ↓ item \d+ to idx p\d+/)
+  await expect(pages.first()).toContainText(/^idx p\d+ · root/)
   const leafBlock = await pages.last().getAttribute('data-block')
   const followed = pages.first().locator('[data-mark="followed"]')
   await expect(followed).toHaveCount(1)
-  await expect(followed).toContainText(`→ p${leafBlock}`)
-  await expect(pages.last()).toContainText(/leaf · [\d,]+ entries/)
-  // The entry that matched, with its key and the row it points at.
+  await expect(followed).toHaveAttribute('data-kind', 'gap')
+  await expect(followed).toContainText(`→ idx p${leafBlock}`)
+  await expect(viz(page).locator('[data-testid="viz-btree-link"][data-kind="down"]')).toHaveCount(1)
+  // The root's other children, left and right of the one followed, as counted boxes.
+  await expect(viz(page).getByTestId('viz-btree-ghost')).toHaveText([/^\d+ pages$/, /^\d+ pages$/])
+  await expect(pages.last()).toContainText(/^idx p\d+ · leaf/)
+  // The entry that matched, and the heap row it points at.
   const matched = pages.last().locator('[data-mark="matched"]')
   await expect(matched).toHaveCount(1)
-  await expect(matched).toContainText(/^4242→ \(\d+,\d+\)$/)
-  await expect(pages.last()).toContainText('high key')
+  await expect(matched).toHaveText('4242')
+  await expect(viz(page).getByTestId('viz-btree-row')).toHaveText(/^heap row \(\d+,\d+\)$/)
   await expect(viz(page).getByTestId('viz-heap-row')).toHaveAttribute('data-outcome', 'emitted')
   await expect(viz(page).getByTestId('viz-heap-row')).toContainText('→ result row 1')
 })
@@ -86,18 +90,21 @@ test('example 4 walks right along the leaves; the timeline moves to any step', a
   await control(page, 'To the end').click()
   await expect(viz(page).getByTestId('viz-reads')).toHaveText('reads 18')
   await expect(viz(page).getByTestId('viz-rows')).toContainText('rows: 1,001 so far')
-  // The root, the 4 leaves walked left to right, and the last one drawn with its entries.
-  await expect(viz(page).getByTestId('viz-leaf-row')).toHaveText(/^idx p\d+→idx p\d+→idx p\d+→idx p\d+$/)
-  await expect(viz(page).getByTestId('viz-index-page')).toHaveCount(2)
-  await expect(viz(page).getByTestId('viz-index-page').last().locator('[data-mark="matched"]')).not.toHaveCount(0)
+  // The root, then the 4 leaves walked left to right: the first and third small, a count for the second, the last in full.
+  const pages = viz(page).getByTestId('viz-btree-page')
+  await expect(pages).toHaveCount(4)
+  await expect(viz(page).locator('[data-testid="viz-btree-page"][data-compact]')).toHaveCount(2)
+  await expect(viz(page).getByTestId('viz-btree-ghost')).toContainText(['+1'])
+  await expect(viz(page).locator('[data-testid="viz-btree-link"][data-kind="right"]')).toHaveCount(3)
+  await expect(pages.last().locator('[data-mark="matched"]')).not.toHaveCount(0)
 
   await page.getByRole('slider', { name: 'Timeline' }).fill('6')
   await expect(step(page)).toHaveText(/^step 6 \//)
   await expect(viz(page).getByTestId('viz-rows')).toContainText('rows: 0 so far')
   // Step 6 visits the first leaf: the search has gone down from the root, but nothing matched yet.
-  await expect(viz(page).getByTestId('viz-leaf-row')).toHaveCount(0)
-  await expect(viz(page).getByTestId('viz-index-page').last()).toHaveAttribute('data-current', '')
-  await expect(viz(page).getByTestId('viz-index-page').last().locator('[data-mark="matched"]')).toHaveCount(0)
+  await expect(pages).toHaveCount(2)
+  await expect(pages.last()).toHaveAttribute('data-current', '')
+  await expect(pages.last().locator('[data-mark="matched"]')).toHaveCount(0)
 })
 
 test('example 11 plays the one page of categories', async ({ page }) => {
