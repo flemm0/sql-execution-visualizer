@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import { editorContent, openApp, planNodes, runSql, setEditorText, statusLines } from './editor'
 import { clickTreePath, treeItem } from './schemaTree'
 
@@ -120,6 +120,55 @@ test('completion offers table names from the live catalog, including new tables'
   await setEditorText(page, '')
   await page.keyboard.type('SELECT * FROM wish')
   await expect(completions).toContainText('wishlist')
+})
+
+/**
+ * CodeMirror ignores Tab and Enter for 75 ms after the suggestions open (its
+ * interactionDelay), so a key already on its way doesn't accept a suggestion
+ * the typist hasn't seen. A person never notices; a test is fast enough to.
+ */
+async function waitPastInteractionDelay(page: Page) {
+  await page.waitForTimeout(150)
+}
+
+test('completion offers columns of the tables the statement names, and Tab or Enter accepts', async ({ page }) => {
+  const completions = page.locator('.cm-tooltip-autocomplete')
+  await setEditorText(page, '')
+  await page.keyboard.type('SELECT * FROM orders WHERE stat')
+  // The column comes first, above keywords like STATE.
+  await expect(completions.getByRole('option').first()).toContainText('status')
+  await waitPastInteractionDelay(page)
+  await page.keyboard.press('Tab')
+  await expect(editorContent(page)).toHaveText('SELECT * FROM orders WHERE status')
+
+  await setEditorText(page, '')
+  await page.keyboard.type('SELECT * FROM order_i')
+  await expect(completions).toContainText('order_items')
+  await waitPastInteractionDelay(page)
+  await page.keyboard.press('Enter')
+  await expect(editorContent(page)).toHaveText('SELECT * FROM order_items')
+})
+
+test('Ctrl+Space opens completion without typing', async ({ page }) => {
+  await setEditorText(page, 'SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id WHERE ')
+  await page.keyboard.press('Control+Space')
+  const completions = page.locator('.cm-tooltip-autocomplete')
+  await expect(completions).toContainText('email')
+  await expect(completions).toContainText('order_date')
+})
+
+test('Tab indents and Shift+Tab dedents; Esc then Tab leaves the editor', async ({ page }) => {
+  await setEditorText(page, 'SELECT 1')
+  await page.keyboard.press('Tab')
+  await expect(editorContent(page)).toHaveText('  SELECT 1')
+  await expect(editorContent(page)).toBeFocused()
+  await page.keyboard.press('Shift+Tab')
+  await expect(editorContent(page)).toHaveText('SELECT 1')
+
+  await page.keyboard.press('Escape')
+  await page.keyboard.press('Tab')
+  await expect(editorContent(page)).not.toBeFocused()
+  await expect(editorContent(page)).toHaveText('SELECT 1')
 })
 
 test('the editor’s text is kept across a reload', async ({ page }) => {
