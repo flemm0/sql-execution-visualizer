@@ -16,7 +16,10 @@ import { nodeProgressAt, resultRowsAt } from './player/playback'
 import { usePlayer } from './player/usePlayer'
 import { ResultsPane, type Filling } from './results/ResultsPane'
 import { SchemaBrowser } from './schema/SchemaBrowser'
+import type { CatalogObject } from './schema/tree'
+import { PageBrowser } from './visualization/PageBrowser'
 import { Visualization } from './visualization/Visualization'
+import { usePageView, type PageTarget } from './visualization/usePageView'
 import { readSetting, saveSetting } from './storage'
 
 // Started once per page load: in development, React's StrictMode runs effects twice.
@@ -87,6 +90,9 @@ export default function App() {
   const nextRunId = useRef(1)
   // One player for the visualization and the results pane, so both show the same step.
   const player = usePlayer()
+  // The table or index page the visualization pane shows instead of the animation, if one is open.
+  const [pageTarget, setPageTarget] = useState<PageTarget | null>(null)
+  const pages = usePageView(pageTarget, state.status !== 'ready' || run.status === 'running' || tidyingUp, getDatabase)
 
   // useCallback keeps the same function between renders, so each notice's
   // timer (which depends on it) isn't restarted every time App renders.
@@ -116,12 +122,16 @@ export default function App() {
     const cursor = view.state.selection.main.head
     setRun({ status: 'running' })
     const db = await getDatabase()
+    // A page being read finishes first: two things never query the database at once.
+    await pages.settled()
     try {
       const options = { emptyCache: emptyCacheOn }
       const results = mode === 'all' ? await runAll(db, sql, options) : await runStatementAt(db, sql, cursor, options)
       setRun({ status: 'done', results, sql, id: nextRunId.current++ })
       const replay = lastQueryOf(results)?.replay
       player.load(replay?.status === 'replayed' ? replay.trace.events.length : 0)
+      // A query to animate takes the visualization pane back; otherwise an open page stays, and is read again.
+      if (replay?.status === 'replayed') setPageTarget(null)
       setTidyingUp(true)
     } catch (error) {
       // Postgres errors are results; this is the database connection itself failing.
@@ -163,6 +173,17 @@ export default function App() {
     saveSetting(EMPTY_CACHE_KEY, on ? 'on' : 'off')
   }
 
+  /** Opens a table's first page or an index's root, from the schema browser; the animation pauses meanwhile. */
+  function openInPageBrowser(object: Extract<CatalogObject, { kind: 'table' | 'index' }>) {
+    const table = { schema: object.table.schema, name: object.table.name }
+    player.pause()
+    setPageTarget(
+      object.kind === 'table'
+        ? { kind: 'table', table, block: 0, highlight: null }
+        : { kind: 'index', table, index: object.index.name, block: null, history: [] },
+    )
+  }
+
   function showPosition(position: number) {
     if (editorView.current) selectInEditor(editorView.current, position)
   }
@@ -171,6 +192,7 @@ export default function App() {
     if (!window.confirm('Reset the database? Your indexes, tables and data changes will be lost.')) return
     setState({ status: 'resetting' })
     setRun({ status: 'idle' })
+    setPageTarget(null)
     try {
       const db = await getDatabase()
       await resetDatabase(db)
@@ -184,7 +206,7 @@ export default function App() {
 
   const overview = state.status === 'ready' ? state.overview : null
   const seedOutdated = overview !== null && overview.seed?.version !== SEED_VERSION
-  const canRun = state.status === 'ready' && run.status !== 'running' && !tidyingUp
+  const canRun = state.status === 'ready' && run.status !== 'running' && !tidyingUp && !pages.loading
   // The last query in the run that has a plan, if any.
   const lastQuery = run.status === 'done' ? lastQueryOf(run.results) : undefined
   const trace = lastQuery?.replay?.status === 'replayed' ? lastQuery.replay.trace : null
@@ -218,7 +240,7 @@ export default function App() {
         <Workspace
           schemaBrowser={
             overview ? (
-              <SchemaBrowser database={overview.catalog} autovacuumOn={autovacuumOn} />
+              <SchemaBrowser database={overview.catalog} autovacuumOn={autovacuumOn} onOpen={openInPageBrowser} />
             ) : (
               <Placeholder>
                 {state.status === 'resetting'
@@ -283,7 +305,14 @@ export default function App() {
             )
           }
           visualization={
-            run.status === 'done' && lastQuery?.plan && lastQuery.replay?.status === 'replayed' ? (
+            pageTarget ? (
+              <PageBrowser
+                target={pageTarget}
+                state={pages.state}
+                onOpen={setPageTarget}
+                onBackToAnimation={trace ? () => setPageTarget(null) : null}
+              />
+            ) : run.status === 'done' && lastQuery?.plan && lastQuery.replay?.status === 'replayed' ? (
               <Visualization
                 key={run.id}
                 plan={lastQuery.plan}
@@ -368,7 +397,7 @@ function visualizationPlaceholder(run: RunState, lastQuery: RowsResult | undefin
   if (replay?.status === 'unsupported') return `${replay.reason} The plan and the result are still real.`
   if (replay?.status === 'failed') return `The replay failed, so there’s nothing to animate: ${replay.message}`
   if (run.status === 'done') return 'The last run had no query to animate. Run a SELECT to watch Postgres run it.'
-  return 'Run a SELECT to watch Postgres run it, one step at a time: the index pages it walks, the pages it reads into shared buffers, and the rows it checks and sends to the result.'
+  return 'Run a SELECT to watch Postgres run it, one step at a time: the index pages it walks, the pages it reads into shared buffers, and the rows it checks and sends to the result. Or click a table or index in the schema browser to look through its pages.'
 }
 
 function resultsPlaceholder(run: RunState) {

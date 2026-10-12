@@ -23,13 +23,14 @@ Each milestone ships as one or more PRs; merging to `main` deploys. A milestone 
 ### M2: replay engine and player
 - Inspector, trace format, replay for **Seq Scan** and **Index Scan** (including Postgres 18 skip scan), validator.
 - Visualization pane (index / shared buffers / heap zones, captions, mini-map), player controls, empty-cache toggle, results building up live.
+- Page browser: a table's or index's pages, opened from the schema browser ([ADR 0032](decisions/0032-open-pages-from-the-schema-browser.md)).
 
 **Exit:** examples 1, 2, 4 and 11 animate end-to-end and validate in tests.
 
 ### M3: rest of v1
 - Replay for Index Only Scan, Bitmap Index Scan + Bitmap Heap Scan, Sort, Limit.
 - Condensing with the ~30 s budget and expandable stretches; jump-to-next controls.
-- All 12 examples in the **Examples** menu; show-internals toggle; idle page browsing; glossary tooltips; polish.
+- All 12 examples in the **Examples** menu; show-internals toggle; glossary tooltips; polish.
 
 **Exit:** all 12 examples animate within budget and validate in tests.
 

@@ -41,7 +41,7 @@ The order matters for getting buffer hits and reads exactly right; the measureme
 
 If Postgres rejects any of steps 1–4, they are dropped and step 5 runs anyway: the query itself reports the error, with positions that match the editor text rather than the `EXPLAIN` prefix. Inside a transaction block, a failed `EXPLAIN` would abort the visitor's transaction, so step 5 would only say "current transaction is aborted". There, steps 1–4 run inside a savepoint, released when they succeed and rolled back when one fails. The rollback doesn't undo evictions, and doesn't need to: they change only the cache, not the visitor's data. In a transaction block that has already failed, no savepoint can be made, and the query reports "current transaction is aborted" as psql would.
 
-Other statements (DDL, DML, `ANALYZE`, `VACUUM`) just run. After each run (one statement or Run all), the autovacuum simulator checks thresholds, then the schema browser and page views refresh.
+Other statements (DDL, DML, `ANALYZE`, `VACUUM`) just run. After each run (one statement or Run all), the autovacuum simulator checks thresholds, then the schema browser and an open page (see Page browser) refresh.
 
 ## Components
 
@@ -125,6 +125,13 @@ Holds the trace and the playback position. Supports play/pause, step forward and
 
 - **Condensing.** A condensing pass groups repetitive runs of real events into **stretches** so a run fits the ~30 s budget at normal speed ([ADR 0005](decisions/0005-realistic-data-and-30s-budget.md)).
 - **Lazy detail.** Stretch summaries carry exact counts. Their full detail is computed only when a stretch is expanded. This keeps a 200,000-row Seq Scan cheap.
+
+### Page browser (main thread)
+`src/db/pageBrowser.ts` reads one page of a table or B-tree index when a visitor opens it from the schema browser; `src/visualization/PageBrowser.tsx` draws it, and `usePageView.ts` reads it again when the target changes or a run ends ([ADR 0032](decisions/0032-open-pages-from-the-schema-browser.md)).
+
+- **Table page:** the rows the session can see on that page and their values as text (`WHERE ctid >= '(n,0)' AND ctid < '(n+1,0)'`, a TID range scan of that page alone), then its line pointers (`heap_page_items`).
+- **Index page:** the metapage (for the root), the page (`bt_page_stats`, `bt_page_items`), and its keys, decoded by `indexKeys.ts` and printed by Postgres in one query.
+- **No side effects:** each read snapshots the cache of the table and its indexes and restores it afterwards (`restoreCache`), and inside a transaction block runs in a savepoint that is rolled back. Reads never overlap a run: Run waits for one to finish, and none starts while a run or its tidying-up is under way.
 
 ### Autovacuum simulator (main thread)
 `src/db/autovacuum.ts`; the decisions are in [ADR 0014](decisions/0014-simulated-autovacuum.md) and [ADR 0021](decisions/0021-autovacuum-simulator.md).
