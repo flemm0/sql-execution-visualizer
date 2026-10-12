@@ -12,7 +12,7 @@ import { SqlEditor, selectInEditor, type RunMode } from './editor/SqlEditor'
 import { APP_NAME, Header } from './layout/Header'
 import { Workspace } from './layout/Workspace'
 import { PlanTree } from './plan/PlanTree'
-import { resultRowsAt } from './player/playback'
+import { nodeProgressAt, resultRowsAt } from './player/playback'
 import { usePlayer } from './player/usePlayer'
 import { ResultsPane, type Filling } from './results/ResultsPane'
 import { SchemaBrowser } from './schema/SchemaBrowser'
@@ -192,6 +192,8 @@ export default function App() {
   // at the last step it's whole (even if the replay sent fewer rows than Postgres did).
   const filling: Filling | null =
     lastQuery && trace && player.position < player.steps ? { result: lastQuery, rows: resultRowsAt(trace, player.position) } : null
+  // Likewise the plan tree highlights the node working now and counts each node's rows so far.
+  const progress = trace && player.position < player.steps ? nodeProgressAt(trace, player.position) : null
 
   return (
     <div className="flex h-screen flex-col">
@@ -275,7 +277,7 @@ export default function App() {
           }
           plan={
             lastQuery?.plan ? (
-              <PlanTree plan={lastQuery.plan} replay={lastQuery.replay} />
+              <PlanTree plan={lastQuery.plan} replay={lastQuery.replay} progress={progress} />
             ) : (
               <Placeholder>{planPlaceholder(run)}</Placeholder>
             )

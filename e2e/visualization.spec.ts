@@ -59,9 +59,16 @@ test('example 2 runs through every page of order_items, step by step or straight
   await control(page, 'To the start').click()
   await expect(step(page)).toHaveText(/^step 0 \/ /)
   await expect(caption(page)).toContainText('Ready to replay')
+  // The plan tree follows the player: the Seq Scan waits, then works, counting its rows as it goes.
+  const planNode = page.getByTestId('plan-node')
+  await expect(planNode).toHaveAttribute('data-status', 'waiting')
+  await expect(planNode.getByTestId('plan-status')).toHaveText('waiting')
+  await expect(planNode.getByTestId('plan-rows')).toHaveText(/^rows 0 so far of 189 · est\. \d+$/)
 
   await control(page, 'Step forward').click()
   await expect(caption(page)).toHaveText('Seq Scan on order_items starts.')
+  await expect(planNode).toHaveAttribute('aria-current', 'step')
+  await expect(planNode.getByTestId('plan-status')).toHaveText('◀ active')
   await control(page, 'Step forward').click()
   await expect(caption(page)).toHaveText('Heap page 0 isn’t in shared buffers, so it’s read from disk into a buffer.')
   await expect(viz(page).getByTestId('viz-slot')).toHaveAttribute('data-current', 'buffer.read')
@@ -74,6 +81,10 @@ test('example 2 runs through every page of order_items, step by step or straight
   await expect(caption(page)).toHaveText('Seq Scan on order_items has no more rows: it sent 189 rows to the result.')
   await expect(viz(page).getByTestId('viz-reads')).toHaveText('reads 1,278')
   await expect(viz(page).getByTestId('viz-rows')).toContainText('rows: 189 so far')
+  // At the end the plan shows Postgres's totals alone, with no node highlighted.
+  await expect(planNode).not.toHaveAttribute('aria-current', 'step')
+  await expect(planNode.getByTestId('plan-status')).toHaveCount(0)
+  await expect(planNode.getByTestId('plan-rows')).toHaveText(/^rows 189 · est\. \d+$/)
   // No index: just shared buffers and the heap.
   await expect(viz(page).getByTestId('viz-index')).toHaveCount(0)
   await expect(viz(page).getByTestId('viz-minimap')).toBeVisible()
@@ -81,6 +92,8 @@ test('example 2 runs through every page of order_items, step by step or straight
   // The step before the end: the last page, which has none of the rows.
   await control(page, 'Step back').click()
   await expect(caption(page)).toHaveText(/^Heap page 1,277: \d+ rows visible to the query/)
+  await expect(planNode.getByTestId('plan-rows')).toHaveText(/^rows 189 so far of 189 · est\. \d+$/)
+  await expect(planNode.getByTestId('plan-status')).toHaveText('◀ active')
 })
 
 test('example 4 walks right along the leaves; the timeline moves to any step', async ({ page }) => {

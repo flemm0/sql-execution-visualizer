@@ -141,6 +141,38 @@ export function resultRowsAt(trace: Trace, position: number): number {
   return rows
 }
 
+/** Where a plan node is at a step: not started, working, or finished. */
+export type NodeStatus = 'waiting' | 'active' | 'done'
+
+/** A plan node's part in the trace so far, for the plan tree. */
+export interface NodeProgress {
+  status: NodeStatus
+  /** Rows it has passed on so far: to its parent node, or, from the top node, to the result. */
+  rows: number
+}
+
+/**
+ * Each plan node's progress after the first `position` events of the trace,
+ * by node id. Every node the trace mentions is in it, from 'waiting' before
+ * its node.start to 'done' after its node.finish.
+ */
+export function nodeProgressAt(trace: Trace, position: number): Map<number, NodeProgress> {
+  const progress = new Map<number, NodeProgress>()
+  for (const event of trace.events) {
+    if (!progress.has(event.node)) progress.set(event.node, { status: 'waiting', rows: 0 })
+  }
+  const end = Math.max(0, Math.min(position, trace.events.length))
+  for (let i = 0; i < end; i++) {
+    const event = trace.events[i]
+    const node = progress.get(event.node)
+    if (node === undefined) continue
+    if (event.type === 'node.start') node.status = 'active'
+    else if (event.type === 'node.finish') node.status = 'done'
+    else if (event.type === 'row.emit') node.rows++
+  }
+  return progress
+}
+
 /** How many of the latest rows or entries the zones list. */
 export const SHOWN_ROWS = 6
 
