@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { DatabaseInfo } from '../db/catalog'
 import { DetailsPanel } from './DetailsPanel'
 import { NodeIcon } from './icons'
-import { buildTree, findNode, findParent, initiallyExpanded, visibleNodes, type TreeNode } from './tree'
+import { buildTree, findNode, findParent, initiallyExpanded, visibleNodes, type CatalogObject, type TreeNode } from './tree'
 
 /**
  * The schema browser: a tree of database → schemas → tables → columns and
@@ -12,14 +12,18 @@ import { buildTree, findNode, findParent, initiallyExpanded, visibleNodes, type 
  * Keyboard (the WAI-ARIA tree pattern): Up/Down move, Right opens or steps into
  * a node, Left closes it or steps out to the parent, Home/End jump, Enter or
  * Space selects (and opens or closes).
+ *
+ * Selecting a table or index also opens its pages in the visualization pane (onOpen).
  */
 interface SchemaBrowserProps {
   database: DatabaseInfo
   /** Whether the autovacuum simulator is turned on, for the table details. */
   autovacuumOn: boolean
+  /** Called when a table or index is selected, to open its pages. */
+  onOpen: (object: Extract<CatalogObject, { kind: 'table' | 'index' }>) => void
 }
 
-export function SchemaBrowser({ database, autovacuumOn }: SchemaBrowserProps) {
+export function SchemaBrowser({ database, autovacuumOn, onOpen }: SchemaBrowserProps) {
   const root = useMemo(() => buildTree(database), [database])
   // Node ids are paths of names, so they stay valid when the catalog is reloaded.
   const [expanded, setExpanded] = useState<Set<string>>(() => initiallyExpanded(root))
@@ -51,6 +55,7 @@ export function SchemaBrowser({ database, autovacuumOn }: SchemaBrowserProps) {
   function activate(node: TreeNode) {
     setFocusedId(node.id)
     if (node.object) setSelectedId(node.id)
+    if (node.object?.kind === 'table' || node.object?.kind === 'index') onOpen(node.object)
     if (node.children.length > 0) setOpen(node.id, !expanded.has(node.id))
   }
 
