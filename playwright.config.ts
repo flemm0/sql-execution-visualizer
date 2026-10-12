@@ -1,6 +1,9 @@
 import { defineConfig, devices } from '@playwright/test'
 
-const baseURL = 'http://localhost:4173/sql-execution-visualizer/'
+const LOCAL_URL = 'http://localhost:4173/sql-execution-visualizer/'
+// Set to the deployed site's URL to test it instead of a local build (the Live check workflow does).
+const liveURL = process.env.LIVE_URL
+const baseURL = liveURL ?? LOCAL_URL
 
 export default defineConfig({
   testDir: 'e2e',
@@ -10,10 +13,13 @@ export default defineConfig({
   use: { baseURL, locale: 'en-US' },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   // Smoke tests run against the production build, as GitHub Pages serves it.
-  webServer: {
-    command: 'npm run build && npm run preview -- --port 4173 --strictPort',
-    url: baseURL,
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-  },
+  // Against the live site, there's nothing to start.
+  webServer: liveURL
+    ? undefined
+    : {
+        command: 'npm run build && npm run preview -- --port 4173 --strictPort',
+        url: LOCAL_URL,
+        reuseExistingServer: !process.env.CI,
+        timeout: 120_000,
+      },
 })

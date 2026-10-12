@@ -1,0 +1,32 @@
+import { expect, test } from '@playwright/test'
+import { openApp, runSql } from './editor'
+
+/*
+ * The milestones' exit criteria (docs/ROADMAP.md), as a visitor sees them.
+ * CI runs this against the local build on every PR, and the Live check
+ * workflow runs it against the deployed site after every deploy.
+ */
+
+const M2_EXAMPLES = [
+  { example: 1, sql: 'SELECT * FROM orders WHERE id = 4242;', node: 'Index Scan using orders_pkey on orders', rows: '1 row' },
+  { example: 2, sql: 'SELECT * FROM order_items WHERE product_id = 42;', node: 'Seq Scan on order_items', rows: '189 rows' },
+  { example: 4, sql: 'SELECT * FROM orders WHERE id BETWEEN 1000 AND 2000;', node: 'Index Scan using orders_pkey on orders', rows: '1,001 rows' },
+  { example: 11, sql: 'SELECT * FROM categories WHERE id = 3;', node: 'Seq Scan on categories', rows: '1 row' },
+]
+
+test.describe('M2: examples 1, 2, 4 and 11 animate end to end and validate', () => {
+  for (const { example, sql, node, rows } of M2_EXAMPLES) {
+    test(`example ${example}`, async ({ page }) => {
+      await openApp(page)
+      await runSql(page, sql)
+      await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres')
+      await expect(page.getByTestId('viz-mismatch')).toHaveCount(0)
+
+      await page.getByTestId('player').getByRole('button', { name: 'To the end', exact: true }).click()
+      await expect(page.getByTestId('viz-caption')).toHaveText(`${node} has no more rows: it sent ${rows} to the result.`)
+      // At the last step the whole result shows.
+      await expect(page.getByTestId('rows-filling')).toHaveCount(0)
+      await expect(page.getByTestId('run-status')).toContainText(`SELECT: ${rows}`)
+    })
+  }
+})

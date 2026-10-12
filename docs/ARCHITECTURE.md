@@ -156,12 +156,12 @@ The database is stored in the browser's IndexedDB (PGlite data dir `idb://sql-ex
 
 ## Hosting and delivery
 
-`vite build` produces static files, deployed to GitHub Pages under `/sql-execution-visualizer/` by GitHub Actions on every push to `main` ([ADR 0012](decisions/0012-github-pages-hosting.md)).
+`vite build` produces static files, deployed to GitHub Pages under `/sql-execution-visualizer/` by GitHub Actions on every push to `main` ([ADR 0012](decisions/0012-github-pages-hosting.md)). After each deploy, the **Live check** workflow runs the milestones' exit criteria (`e2e/exit-criteria.spec.ts`) against the live site ([ADR 0034](decisions/0034-exit-criteria-on-the-live-site.md)).
 
 ## Testing
 
 - **Vitest (Node):** PGlite runs in Node, so the worker pipeline (runner, inspector, replay, validator) is tested without a browser. Each example query must replay and validate cleanly.
-- **Playwright:** tests load the production build in Chromium and do what a visitor does: first visit, reload, several tabs, reset, and running statements in the SQL editor (results, plans, errors, and changes surviving a reload). Each Playwright test gets a fresh browser profile, so each starts with an empty IndexedDB.
+- **Playwright:** tests load the production build in Chromium and do what a visitor does: first visit, reload, several tabs, reset, and running statements in the SQL editor (results, plans, errors, and changes surviving a reload). Each Playwright test gets a fresh browser profile, so each starts with an empty IndexedDB. With `LIVE_URL` set, they test that site instead of a local build.
 - Unit tests run in Node, so `tsconfig.node.json` typechecks them; browser code is typechecked without Node's types.
 - Every PR adds tests for the behavior it adds and lists in its description what is not tested yet ([ADR 0018](decisions/0018-tests-in-every-pr.md)).
 
