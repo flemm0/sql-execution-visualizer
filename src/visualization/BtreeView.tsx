@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { NODE_HEIGHT, layoutBtree, type Cell, type LayoutInput, type LinkShape, type PageShape } from './btreeLayout'
+import { NODE_HEIGHT, layoutBtree, type Cell, type LayoutInput, type LinkShape, type PageShape, type RowPointer } from './btreeLayout'
 
 /** The width to lay out for before the zone has been measured. */
 const STARTING_WIDTH = 480
@@ -50,6 +50,9 @@ export function BtreeView(props: Omit<LayoutInput, 'width'>) {
           <marker id="btree-arrow-heap" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
             <path d="M0,0 L8,4 L0,8 z" fill="var(--accent-heap)" />
           </marker>
+          <marker id="btree-arrow-intermediate" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="var(--accent-intermediate)" />
+          </marker>
         </defs>
         {layout.links.map((link, i) => (
           <Link key={i} link={link} />
@@ -74,21 +77,7 @@ export function BtreeView(props: Omit<LayoutInput, 'width'>) {
         {layout.pages.map((page) => (
           <Page key={`${page.block}-${page.compact}`} page={page} />
         ))}
-        {layout.rowPointer && (
-          <g data-testid="viz-btree-row">
-            <line
-              x1={layout.rowPointer.x}
-              y1={layout.rowPointer.y1}
-              x2={layout.rowPointer.x}
-              y2={layout.rowPointer.y2 - 12}
-              stroke="var(--accent-heap)"
-              markerEnd="url(#btree-arrow-heap)"
-            />
-            <text x={layout.rowPointer.x} y={layout.rowPointer.y2} textAnchor="middle" fill="var(--accent-heap)">
-              {layout.rowPointer.text}
-            </text>
-          </g>
-        )}
+        {layout.rowPointer && <RowPointerArrow pointer={layout.rowPointer} />}
       </svg>
     </div>
   )
@@ -113,6 +102,20 @@ function Link({ link }: { link: LinkShape }) {
       data-testid="viz-btree-link"
       data-kind={link.kind}
     />
+  )
+}
+
+/** The arrow from the latest match down to its heap row (amber), or into the bitmap (violet: an intermediate result). */
+function RowPointerArrow({ pointer }: { pointer: RowPointer }) {
+  const color = pointer.kind === 'bitmap' ? 'var(--accent-intermediate)' : 'var(--accent-heap)'
+  const marker = pointer.kind === 'bitmap' ? 'url(#btree-arrow-intermediate)' : 'url(#btree-arrow-heap)'
+  return (
+    <g data-testid="viz-btree-row" data-kind={pointer.kind}>
+      <line x1={pointer.x} y1={pointer.y1} x2={pointer.x} y2={pointer.y2 - 12} stroke={color} markerEnd={marker} />
+      <text x={pointer.x} y={pointer.y2} textAnchor="middle" fill={color}>
+        {pointer.text}
+      </text>
+    </g>
   )
 }
 

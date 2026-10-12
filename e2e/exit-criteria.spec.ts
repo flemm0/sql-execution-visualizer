@@ -31,20 +31,63 @@ test.describe('M2: examples 1, 2, 4 and 11 animate end to end and validate', () 
   }
 })
 
-/** M3's examples, as each one's replay lands; the criteria hold once all 12 are here (and within the ~30 s budget). */
+/**
+ * M3's examples, as each one's replay lands; the criteria hold once all 12 are here (and within the ~30 s budget).
+ * `setup` runs first, as its own run: the index an example adds.
+ */
 const M3_EXAMPLES = [
   {
-    example: 9,
+    name: 'example 3: once order_items has an index on product_id, a bitmap scan',
+    setup: 'CREATE INDEX ON order_items (product_id);',
+    sql: 'SELECT * FROM order_items WHERE product_id = 42;',
+    node: 'Bitmap Heap Scan on order_items',
+    rows: '189 rows',
+  },
+  {
+    name: 'example 5: a rare status, an Index Scan',
+    setup: 'CREATE INDEX ON orders (status);',
+    sql: `SELECT * FROM orders WHERE status = 'pending';`,
+    node: 'Index Scan using orders_status_idx on orders',
+    rows: '1,498 rows',
+  },
+  {
+    name: 'example 5: a common status, a Seq Scan',
+    setup: 'CREATE INDEX ON orders (status);',
+    sql: `SELECT * FROM orders WHERE status = 'delivered';`,
+    node: 'Seq Scan on orders',
+    rows: '45,000 rows',
+  },
+  {
+    name: 'example 6: a bitmap scan',
+    sql: 'SELECT * FROM orders WHERE customer_id BETWEEN 100 AND 300;',
+    node: 'Bitmap Heap Scan on orders',
+    rows: '944 rows',
+  },
+  {
+    name: 'example 9: an index-only scan',
     sql: 'SELECT order_date FROM orders WHERE customer_id = 42;',
     node: 'Index Only Scan using orders_customer_id_order_date_idx on orders',
     rows: '3 rows',
   },
+  {
+    name: 'example 12: ids in the table’s order, an Index Scan',
+    sql: 'SELECT * FROM orders WHERE id BETWEEN 1 AND 500;',
+    node: 'Index Scan using orders_pkey on orders',
+    rows: '500 rows',
+  },
+  {
+    name: 'example 12: customers scattered across the table, a bitmap scan',
+    sql: 'SELECT * FROM orders WHERE customer_id BETWEEN 1 AND 100;',
+    node: 'Bitmap Heap Scan on orders',
+    rows: '468 rows',
+  },
 ]
 
 test.describe('M3: the examples animate end to end and validate', () => {
-  for (const { example, sql, node, rows } of M3_EXAMPLES) {
-    test(`example ${example}`, async ({ page }) => {
+  for (const { name, setup, sql, node, rows } of M3_EXAMPLES) {
+    test(name, async ({ page }) => {
       await openApp(page)
+      if (setup !== undefined) await runSql(page, setup)
       await runSql(page, sql)
       await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres')
       await expect(page.getByTestId('viz-mismatch')).toHaveCount(0)

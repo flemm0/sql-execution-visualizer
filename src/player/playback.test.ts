@@ -289,6 +289,126 @@ describe('the state at a step', () => {
   })
 })
 
+describe('the state of a bitmap scan at a step', () => {
+  const bitmapNodes = new Map<number, NodeInfo>([
+    [0, { title: 'Bitmap Heap Scan on orders', hasFilter: false }],
+    [1, { title: 'Bitmap Index Scan on orders_pkey', hasFilter: false }],
+  ])
+  /** The index scan marks 3 rows on 2 heap pages; the heap scan reads them in physical order. */
+  const bitmapScan = trace([
+    { type: 'node.start', node: 0 },
+    { type: 'node.start', node: 1 },
+    { type: 'index.search', node: 1, index: INDEX },
+    { type: 'buffer.read', node: 1, page: indexPage(3) },
+    { type: 'index.visit', node: 1, page: indexPage(3), level: 1, downlink: 2 },
+    { type: 'buffer.read', node: 1, page: indexPage(57) },
+    { type: 'index.visit', node: 1, page: indexPage(57), level: 0, downlink: null },
+    { type: 'index.entry', node: 1, page: indexPage(57), offset: 7, key: ['42'], row: row(212, 4), bitmap: true },
+    { type: 'index.entry', node: 1, page: indexPage(57), offset: 8, key: ['42'], row: row(30, 2), bitmap: true },
+    { type: 'index.entry', node: 1, page: indexPage(57), offset: 9, key: ['43'], row: row(212, 1), bitmap: true },
+    { type: 'node.finish', node: 1 },
+    { type: 'buffer.read', node: 0, page: heapPage(30) },
+    { type: 'heap.tuple', node: 0, row: row(30, 2), visible: row(30, 2), matched: true },
+    { type: 'row.emit', node: 0, row: row(30, 2), resultIndex: 0 },
+    { type: 'buffer.hit', node: 0, page: heapPage(212) },
+    { type: 'heap.tuple', node: 0, row: row(212, 1), visible: null, matched: false },
+    { type: 'heap.tuple', node: 0, row: row(212, 4), visible: row(212, 4), matched: true },
+    { type: 'row.emit', node: 0, row: row(212, 4), resultIndex: 1 },
+    { type: 'node.finish', node: 0 },
+  ])
+
+  it('builds the bitmap, then reads its pages in order, with a caption for each step', () => {
+    const captions = bitmapScan.events.map((_, i) => stateAt(bitmapScan, bitmapNodes, i + 1).caption)
+    expect(captions).toEqual([
+      'Bitmap Heap Scan on orders starts.',
+      'Bitmap Index Scan on orders_pkey starts.',
+      'The scan searches orders_pkey from its root for the first entry that can match.',
+      'Index page 3 isn’t in shared buffers, so it’s read from disk into a buffer.',
+      'On index page 3 (the root), the search follows item 2 down to the page below.',
+      'Index page 57 isn’t in shared buffers, so it’s read from disk into a buffer.',
+      'The search reaches leaf index page 57, and looks for the first entry that can match.',
+      'Entry 42 (item 7) matches; the scan marks its row, (212,4), in the bitmap instead of fetching it (heap page 212: 1 row marked).',
+      'Entry 42 (item 8) matches; the scan marks its row, (30,2), in the bitmap instead of fetching it (heap page 30: 1 row marked).',
+      'Entry 43 (item 9) matches; the scan marks its row, (212,1), in the bitmap instead of fetching it (heap page 212: 2 rows marked).',
+      'Bitmap Index Scan on orders_pkey is done: its bitmap marks 3 rows on 2 heap pages. Bitmap Heap Scan on orders reads those pages next, in physical order, each one once.',
+      'Heap page 30, page 1 of 2 in the bitmap, has 1 row marked. It isn’t in shared buffers, so it’s read from disk into a buffer.',
+      'Row (30,2) is visible to this query.',
+      'Row (30,2) goes to the result as row 1.',
+      'Heap page 212, page 2 of 2 in the bitmap, has 2 rows marked. It is already in shared buffers: a hit, no disk read.',
+      'Row (212,1) isn’t visible to this query (deleted, or not yet committed), so it’s skipped.',
+      'Row (212,4) is visible to this query.',
+      'Row (212,4) goes to the result as row 2.',
+      'Bitmap Heap Scan on orders has no more rows: it sent 2 rows to the result.',
+    ])
+  })
+
+  it('marks the bitmap’s pages on the mini-map before any is read, then each as it’s read', () => {
+    const built = stateAt(bitmapScan, bitmapNodes, 10)
+    expect(built.bitmap).toEqual({
+      node: 1,
+      pages: new Map([
+        [212, [4, 1]],
+        [30, [2]],
+      ]),
+      rows: 3,
+      pagesRead: 0,
+    })
+    expect([...built.pageMarks]).toEqual([
+      [212, 'bitmap'],
+      [30, 'bitmap'],
+    ])
+    expect(built.heap).toBeNull()
+    expect(built.index?.entries.map((entry) => entry.bitmap)).toEqual([true, true, true])
+    expect(built.nodeRows).toEqual(new Map([[1, 3]]))
+
+    const firstPage = stateAt(bitmapScan, bitmapNodes, 12)
+    expect(firstPage.heap).toMatchObject({ page: heapPage(30), bitmapRows: 1, rows: [] })
+    expect(firstPage.bitmap?.pagesRead).toBe(1)
+    expect(firstPage.pageMarks.get(30)).toBe('touched')
+    expect(firstPage.pageMarks.get(212)).toBe('bitmap')
+
+    const end = stateAt(bitmapScan, bitmapNodes, bitmapScan.events.length)
+    expect(end.heap).toMatchObject({ page: heapPage(212), bitmapRows: 2, rowCount: 2 })
+    expect(end.heap?.rows.map((each) => each.outcome)).toEqual(['invisible', 'emitted'])
+    expect(end.bitmap?.pagesRead).toBe(2)
+    expect([...end.pageMarks]).toEqual([
+      [212, 'result'],
+      [30, 'result'],
+    ])
+    expect(end.nodeRows).toEqual(new Map([[1, 3], [0, 2]]))
+  })
+
+  it('makes the parent the active node again when its child finishes', () => {
+    const active = (position: number) => stateAt(bitmapScan, bitmapNodes, position).activeNode
+    expect([0, 1, 2, 10, 11, 12, 18, 19].map(active)).toEqual([null, 0, 1, 1, 0, 0, 0, null])
+    expect(stateAt(bitmapScan, bitmapNodes, 11).lastNode).toBe(1)
+  })
+
+  it('counts the rows a bitmap index scan marks as the rows it passes on, in the plan tree too', () => {
+    expect(Object.fromEntries(nodeProgressAt(bitmapScan, 11))).toEqual({
+      0: { status: 'active', rows: 0 },
+      1: { status: 'done', rows: 3 },
+    })
+    expect(resultRowsAt(bitmapScan, 11)).toBe(0)
+  })
+
+  it('a bitmap index scan that finds nothing passes no rows up to its parent', () => {
+    const empty = trace([
+      { type: 'node.start', node: 0 },
+      { type: 'node.start', node: 1 },
+      { type: 'index.search', node: 1, index: INDEX },
+      { type: 'buffer.read', node: 1, page: indexPage(3) },
+      { type: 'index.visit', node: 1, page: indexPage(3), level: 0, downlink: null },
+      { type: 'node.finish', node: 1 },
+      { type: 'node.finish', node: 0 },
+    ])
+    expect(stateAt(empty, bitmapNodes, 6).caption).toBe(
+      'Bitmap Index Scan on orders_pkey has no more rows: it passed 0 rows up to Bitmap Heap Scan on orders.',
+    )
+    expect(stateAt(empty, bitmapNodes, 6).bitmap).toBeNull()
+  })
+})
+
 describe('the rows sent to the result by a step', () => {
   it('counts the rows emitted to the result, not those passed to a parent node', () => {
     const events: TraceEvent[] = [

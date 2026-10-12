@@ -1,4 +1,4 @@
-import type { HeapTupleEvent, PageRef, RowRef, Trace, TraceEvent, TraceRelation } from '../replay/trace'
+import { passesRowOn, type HeapTupleEvent, type PageRef, type RowRef, type Trace, type TraceEvent, type TraceRelation } from '../replay/trace'
 
 /*
  * What the visualization shows at a point in the trace: the state after the
@@ -40,6 +40,8 @@ export interface MatchedEntry {
   offset: number
   key: (string | null)[]
   row: RowRef
+  /** Whether a bitmap index scan marked its row in the bitmap, rather than a scan fetching it. */
+  bitmap: boolean
 }
 
 /** What the index zone shows: the current search down the index, and the matches on its leaf. */
@@ -96,6 +98,8 @@ export interface HeapView {
    * read) or not (rows are fetched from it); null for other scans.
    */
   allVisible: boolean | null
+  /** For a bitmap heap scan, how many rows the bitmap marks on the page; null for other scans. */
+  bitmapRows: number | null
   /** Rows on it the scan has dealt with, the latest last (at most SHOWN_ROWS). */
   rows: HeapRow[]
   /** How many rows on it the scan has dealt with. */
@@ -104,10 +108,26 @@ export interface HeapView {
 
 /**
  * Each heap page's part in the query so far, for the mini-map: read
- * ('touched'), read and gave rows to the result ('result'), or all-visible,
- * so an index-only scan didn't read it ('fromIndex').
+ * ('touched'), read and gave rows to the result ('result'), all-visible, so
+ * an index-only scan didn't read it ('fromIndex'), or marked in a bitmap and
+ * not read yet ('bitmap').
  */
-export type PageMark = 'touched' | 'result' | 'fromIndex'
+export type PageMark = 'touched' | 'result' | 'fromIndex' | 'bitmap'
+
+/**
+ * The bitmap a bitmap index scan builds: for each heap page, the rows on it
+ * that matched. Its parent reads those pages afterwards, in physical order.
+ */
+export interface BitmapView {
+  /** The plan node that builds it (the bitmap index scan). */
+  node: number
+  /** The rows it marks, by heap page: each page's line pointer numbers. */
+  pages: Map<number, number[]>
+  /** How many rows it marks. */
+  rows: number
+  /** How many of its pages have been read so far. */
+  pagesRead: number
+}
 
 export interface PlaybackState {
   /** How many events have happened. */
@@ -116,7 +136,11 @@ export interface PlaybackState {
   current: TraceEvent | null
   /** A sentence about it. */
   caption: string
-  /** The node working now; null before it starts and after it finishes. */
+  /**
+   * The node working now: the latest to start and not finish (a parent works
+   * again once its child finishes); null before the first starts and after
+   * the last finishes.
+   */
   activeNode: number | null
   /** The node that worked last (the active one, or the one that just finished). */
   lastNode: number | null
@@ -126,6 +150,8 @@ export interface PlaybackState {
   buffers: BufferSlot[]
   /** Rows sent to the result so far. */
   resultRows: number
+  /** Rows each plan node has passed on so far, by node id (see passesRowOn). */
+  nodeRows: Map<number, number>
   /** The table the query reads (the heap zone). */
   table: TraceRelation | null
   /** Heap pages of that table the query has been through, by block. */
@@ -133,6 +159,8 @@ export interface PlaybackState {
   heap: HeapView | null
   /** Null for a scan that reads no index. */
   index: IndexView | null
+  /** Null for a plan without a bitmap scan. */
+  bitmap: BitmapView | null
 }
 
 /**
@@ -157,7 +185,10 @@ export type NodeStatus = 'waiting' | 'active' | 'done'
 /** A plan node's part in the trace so far, for the plan tree. */
 export interface NodeProgress {
   status: NodeStatus
-  /** Rows it has passed on so far: to its parent node, or, from the top node, to the result. */
+  /**
+   * Rows it has passed on so far: to its parent node, or, from the top node,
+   * to the result; for a bitmap index scan, rows marked in its bitmap.
+   */
   rows: number
 }
 
@@ -178,7 +209,7 @@ export function nodeProgressAt(trace: Trace, position: number): Map<number, Node
     if (node === undefined) continue
     if (event.type === 'node.start') node.status = 'active'
     else if (event.type === 'node.finish') node.status = 'done'
-    else if (event.type === 'row.emit') node.rows++
+    else if (passesRowOn(event)) node.rows++
   }
   return progress
 }
@@ -205,14 +236,17 @@ export function stateAt(trace: Trace, nodes: Map<number, NodeInfo>, position: nu
     reads: 0,
     buffers: [],
     resultRows: 0,
+    nodeRows: new Map(),
     table: scannedTable(trace),
     pageMarks: new Map(),
     heap: null,
     index: null,
+    bitmap: null,
   }
   const slots = new Set<string>()
+  const working: number[] = []
   for (let i = 0; i < end; i++) {
-    apply(state, trace.events[i], relations, slots)
+    apply(state, trace.events[i], relations, slots, working)
   }
   if (state.current !== null) state.caption = describe(state.current, state, relations, nodes)
   return state
@@ -234,18 +268,31 @@ function scannedTable(trace: Trace): TraceRelation | null {
   return tables.size === 1 ? [...tables.values()][0] : null
 }
 
-/** Applies one event to the state. */
-function apply(state: PlaybackState, event: TraceEvent, relations: Map<number, TraceRelation>, slots: Set<string>) {
+/**
+ * Applies one event to the state. `slots` holds the pages in the buffers
+ * zone, as "relation/fork/block"; `working`, the nodes started and not
+ * finished, the latest last.
+ */
+function apply(
+  state: PlaybackState,
+  event: TraceEvent,
+  relations: Map<number, TraceRelation>,
+  slots: Set<string>,
+  working: number[],
+) {
   state.current = event
   state.lastNode = event.node
+  if (passesRowOn(event)) state.nodeRows.set(event.node, (state.nodeRows.get(event.node) ?? 0) + 1)
 
   switch (event.type) {
     case 'node.start':
+      working.push(event.node)
       state.activeNode = event.node
       break
 
     case 'node.finish':
-      state.activeNode = null
+      working.splice(working.lastIndexOf(event.node), 1)
+      state.activeNode = working.at(-1) ?? null
       break
 
     case 'buffer.hit':
@@ -259,8 +306,15 @@ function apply(state: PlaybackState, event: TraceEvent, relations: Map<number, T
         state.buffers.push({ page: event.page, wasCached: hit })
       }
       if (relations.get(event.page.relation)?.kind === 'table' && event.page.fork === undefined) {
-        enterHeapPage(state, event.page)
-        state.pageMarks.set(event.page.block, state.pageMarks.get(event.page.block) ?? 'touched')
+        const heap = enterHeapPage(state, event.page)
+        markTouched(state, event.page.block)
+        // A bitmap heap scan reading the next page its bitmap marks.
+        const bitmap = state.bitmap
+        const marked = bitmap?.pages.get(event.page.block)
+        if (bitmap !== null && marked !== undefined && event.node !== bitmap.node) {
+          if (heap.bitmapRows === null) bitmap.pagesRead++
+          heap.bitmapRows = marked.length
+        }
       }
       break
     }
@@ -269,7 +323,7 @@ function apply(state: PlaybackState, event: TraceEvent, relations: Map<number, T
       const heap = enterHeapPage(state, event.page)
       heap.visibleRows = event.visibleRows
       heap.matchedRows = event.matchedRows
-      state.pageMarks.set(event.page.block, state.pageMarks.get(event.page.block) ?? 'touched')
+      markTouched(state, event.page.block)
       break
     }
 
@@ -301,12 +355,14 @@ function apply(state: PlaybackState, event: TraceEvent, relations: Map<number, T
     }
 
     case 'index.entry': {
+      const bitmap = event.bitmap === true
+      if (bitmap) markInBitmap(state, event.node, event.row)
       const view = state.index
       if (view === null) break
       view.entryCount++
       // A posting list's entry matches once for each row it points at.
       if (view.matchedOffsets.at(-1) !== event.offset) view.matchedOffsets.push(event.offset)
-      view.entries = latest(view.entries, { offset: event.offset, key: event.key, row: event.row })
+      view.entries = latest(view.entries, { offset: event.offset, key: event.key, row: event.row, bitmap })
       break
     }
 
@@ -363,6 +419,23 @@ function apply(state: PlaybackState, event: TraceEvent, relations: Map<number, T
   }
 }
 
+/** Marks a heap page as read, unless it already says more (it gave rows to the result, or the visibility map spared it). */
+function markTouched(state: PlaybackState, block: number) {
+  const mark = state.pageMarks.get(block)
+  if (mark === undefined || mark === 'bitmap') state.pageMarks.set(block, 'touched')
+}
+
+/** Adds a row to the bitmap `node` builds, and marks its page on the mini-map. */
+function markInBitmap(state: PlaybackState, node: number, row: RowRef) {
+  state.bitmap ??= { node, pages: new Map(), rows: 0, pagesRead: 0 }
+  const offsets = state.bitmap.pages.get(row.block) ?? []
+  if (!offsets.includes(row.offset)) {
+    state.bitmap.pages.set(row.block, [...offsets, row.offset])
+    state.bitmap.rows++
+  }
+  if (!state.pageMarks.has(row.block)) state.pageMarks.set(row.block, 'bitmap')
+}
+
 /** The version of a fetched row the query sees, when an UPDATE put a newer one on the same page; null otherwise. */
 function updatedVersion(event: HeapTupleEvent): RowRef | null {
   const { row, visible } = event
@@ -397,14 +470,34 @@ function describe(
     case 'node.start':
       return `${title} starts.`
 
-    case 'node.finish':
-      return `${title} has no more rows: it sent ${rowCount(state.resultRows)} to the result.`
+    case 'node.finish': {
+      if (state.activeNode === null) return `${title} has no more rows: it sent ${rowCount(state.resultRows)} to the result.`
+      // The node working again is the parent this one passed its rows, or its bitmap, up to.
+      const parent = nodes.get(state.activeNode)?.title ?? `plan node ${state.activeNode}`
+      const bitmap = state.bitmap
+      if (bitmap !== null && bitmap.node === event.node) {
+        const pages = bitmap.pages.size
+        return `${title} is done: its bitmap marks ${rowCount(bitmap.rows)} on ${integer.format(pages)} heap ${pages === 1 ? 'page' : 'pages'}. ${parent} reads those pages next, in physical order, each one once.`
+      }
+      return `${title} has no more rows: it passed ${rowCount(state.nodeRows.get(event.node) ?? 0)} up to ${parent}.`
+    }
 
     case 'buffer.hit':
-      return `${capitalize(pageName(event.page, relations))} is already in shared buffers: a hit, no disk read.`
-
-    case 'buffer.read':
-      return `${capitalize(pageName(event.page, relations))} isn’t in shared buffers, so it’s read from disk into a buffer.`
+    case 'buffer.read': {
+      const page = capitalize(pageName(event.page, relations))
+      const access =
+        event.type === 'buffer.hit'
+          ? 'is already in shared buffers: a hit, no disk read.'
+          : 'isn’t in shared buffers, so it’s read from disk into a buffer.'
+      const bitmap = state.bitmap
+      const heap = state.heap
+      const reading =
+        bitmap !== null && event.node !== bitmap.node && heap !== null && heap.bitmapRows !== null && samePage(heap.page, event.page)
+      if (!reading) return `${page} ${access}`
+      const marked = heap.bitmapRows ?? 0
+      const where = `${page}, page ${integer.format(bitmap.pagesRead)} of ${integer.format(bitmap.pages.size)} in the bitmap, has ${rowCount(marked)} marked.`
+      return `${where} It ${access}`
+    }
 
     case 'heap.page': {
       const page = capitalize(pageName(event.page, relations))
@@ -435,8 +528,13 @@ function describe(
       return `On ${page} (${where}), the search follows item ${event.downlink} down to the page below.`
     }
 
-    case 'index.entry':
-      return `Entry ${formatKey(event.key)} (item ${event.offset}) matches; it points at row ${rowName(event.row)}.`
+    case 'index.entry': {
+      const entry = `Entry ${formatKey(event.key)} (item ${event.offset}) matches`
+      if (event.bitmap !== true) return `${entry}; it points at row ${rowName(event.row)}.`
+      const marked = state.bitmap?.pages.get(event.row.block)?.length ?? 1
+      const page = pageName({ relation: event.row.relation, block: event.row.block }, relations)
+      return `${entry}; the scan marks its row, ${rowName(event.row)}, in the bitmap instead of fetching it (${page}: ${rowCount(marked)} marked).`
+    }
 
     case 'index.markDead': {
       const one = event.offsets.length === 1
@@ -478,8 +576,12 @@ function describe(
 /** Makes `page` the heap zone's page, starting a fresh view when it's another page. */
 function enterHeapPage(state: PlaybackState, page: PageRef): HeapView {
   if (state.heap && state.heap.page.relation === page.relation && state.heap.page.block === page.block) return state.heap
-  state.heap = { page, visibleRows: null, matchedRows: null, allVisible: null, rows: [], rowCount: 0 }
+  state.heap = { page, visibleRows: null, matchedRows: null, allVisible: null, bitmapRows: null, rows: [], rowCount: 0 }
   return state.heap
+}
+
+function samePage(a: PageRef, b: PageRef) {
+  return a.relation === b.relation && a.block === b.block && a.fork === b.fork
 }
 
 /** The list with `item` added at the end, keeping at most SHOWN_ROWS. */

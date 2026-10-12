@@ -83,12 +83,14 @@ export interface GhostShape {
   text: string
 }
 
-/** From the latest matched entry down to the heap row it points at. */
+/** From the latest matched entry down to the heap row it points at, or for a bitmap index scan, into the bitmap. */
 export interface RowPointer {
   x: number
   y1: number
   y2: number
   text: string
+  /** 'heap' when the scan fetches the row, 'bitmap' when it marks the row in its bitmap. */
+  kind: 'heap' | 'bitmap'
 }
 
 export interface BtreeLayout {
@@ -441,7 +443,10 @@ function gapCenterAfter(shape: PageShape): number {
   return after ? after.x + after.width / 2 : shape.width
 }
 
-/** A line down from the latest matched entry on the current leaf to the heap row it points at. */
+/**
+ * A line down from the latest matched entry on the current leaf to the heap
+ * row it points at, or to the bitmap that row is marked in.
+ */
 function rowPointer(input: LayoutInput, layout: BtreeLayout): RowPointer | null {
   const latest = input.view.entries.at(-1)
   const leaf = layout.pages.at(-1)
@@ -449,7 +454,9 @@ function rowPointer(input: LayoutInput, layout: BtreeLayout): RowPointer | null 
   const cell = leaf.cells.find((each) => each.kind === 'key' && each.offset === latest.offset)
   if (cell === undefined) return null
   const y1 = leaf.y + NODE_HEIGHT
-  return { x: leaf.x + cell.x + cell.width / 2, y1, y2: y1 + 26, text: `heap row ${rowName(latest.row)}` }
+  const x = leaf.x + cell.x + cell.width / 2
+  if (latest.bitmap) return { x, y1, y2: y1 + 26, text: `bitmap: row ${rowName(latest.row)}`, kind: 'bitmap' }
+  return { x, y1, y2: y1 + 26, text: `heap row ${rowName(latest.row)}`, kind: 'heap' }
 }
 
 function pageLabel(contents: IndexPageContents): string {

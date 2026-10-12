@@ -4,6 +4,7 @@ import {
   rowName,
   shortPageName,
   stateAt,
+  type BitmapView,
   type HeapRow,
   type IndexView,
   type NodeInfo,
@@ -69,16 +70,20 @@ export function Visualization({ plan, trace, validation, player }: Visualization
   )
 }
 
-/** The plan node working now, with the rows it has sent to the result so far against the planner's estimate. */
+/**
+ * The plan node working now (or that just finished), with the rows it has
+ * passed on so far (to the result, or for a bitmap index scan, into its
+ * bitmap) against the planner's estimate.
+ */
 function NodeLine({ node, state }: { node: PlanNode | null; state: PlaybackState }) {
   if (node === null) return null
-  const status = state.activeNode !== null ? 'active' : state.position === 0 ? 'waiting' : 'done'
+  const status = state.activeNode === node.id ? 'active' : state.position === 0 ? 'waiting' : 'done'
   return (
     <div className="flex flex-wrap items-baseline gap-x-3 border-b border-line px-3 py-1.5" data-testid="viz-node">
       <span className="font-semibold">{node.title}</span>
       <span className="text-fg-muted">{status}</span>
       <span className="font-mono text-fg-muted" data-testid="viz-rows">
-        rows: {integer.format(state.resultRows)} so far / est. {integer.format(node.estimatedRows)}
+        rows: {integer.format(state.nodeRows.get(node.id) ?? 0)} so far / est. {integer.format(node.estimatedRows)}
       </span>
     </div>
   )
@@ -173,11 +178,18 @@ function HeapZone({ state }: { state: PlaybackState }) {
   const heap = state.heap
   return (
     <Zone title={`Heap ${table.name} (${integer.format(table.pages)} ${table.pages === 1 ? 'page' : 'pages'})`} testId="viz-heap">
+      {state.bitmap && <BitmapLine bitmap={state.bitmap} />}
       <MiniMap pages={table.pages} marks={state.pageMarks} current={heap?.page.relation === table.id ? heap.page.block : null} />
       {heap && (
         <div data-testid="viz-heap-page">
           <p>
             <span className="font-mono text-heap">heap page {integer.format(heap.page.block)}</span>
+            {heap.bitmapRows !== null && (
+              <span className="text-fg-muted" data-testid="viz-bitmap-rows">
+                {' '}
+                · {integer.format(heap.bitmapRows)} {heap.bitmapRows === 1 ? 'row' : 'rows'} marked in the bitmap
+              </span>
+            )}
             {heap.allVisible !== null && (
               <span className="text-fg-muted" data-testid="viz-all-visible">
                 {' '}
@@ -203,6 +215,18 @@ function HeapZone({ state }: { state: PlaybackState }) {
   )
 }
 
+/** The bitmap (violet, an intermediate result): the rows and pages it marks, and how many of those pages have been read. */
+function BitmapLine({ bitmap }: { bitmap: BitmapView }) {
+  const pages = bitmap.pages.size
+  return (
+    <p className="font-mono text-intermediate" data-testid="viz-bitmap">
+      bitmap: {integer.format(bitmap.rows)} {bitmap.rows === 1 ? 'row' : 'rows'} on {integer.format(pages)}{' '}
+      {pages === 1 ? 'page' : 'pages'}
+      {bitmap.pagesRead > 0 && ` · ${integer.format(bitmap.pagesRead)} of ${integer.format(pages)} read`}
+    </p>
+  )
+}
+
 const OUTCOMES: Record<HeapRow['outcome'], { mark: string; text: string; color: string }> = {
   passed: { mark: '✓', text: 'passes', color: 'text-fg' },
   emitted: { mark: '✓', text: '→ result', color: 'text-result' },
@@ -225,8 +249,10 @@ function HeapRowItem({ row }: { row: HeapRow }) {
  * Every page of the table as a square, in order: the ones the query has been
  * through (amber), the ones that gave rows to the result (emerald), the ones
  * an index-only scan didn't read because they're all-visible (sky, the
- * index's color: their rows came from the index), and the one being read
- * now (outlined). A big table gets several pages per square.
+ * index's color: their rows came from the index), the ones a bitmap marks
+ * and the scan hasn't read yet (violet), and the one being read now
+ * (outlined). A big table gets several pages per square, which shows the
+ * strongest of their marks (MARK_RANK).
  */
 function MiniMap({ pages, marks, current }: { pages: number; marks: Map<number, PageMark>; current: number | null }) {
   const perCell = Math.max(1, Math.ceil(pages / MAX_MINIMAP_CELLS))
@@ -234,7 +260,8 @@ function MiniMap({ pages, marks, current }: { pages: number; marks: Map<number, 
   const cellMarks: (PageMark | undefined)[] = new Array(cells)
   for (const [block, mark] of marks) {
     const cell = Math.floor(block / perCell)
-    if (cellMarks[cell] !== 'result') cellMarks[cell] = mark
+    const shown = cellMarks[cell]
+    if (shown === undefined || MARK_RANK.indexOf(mark) > MARK_RANK.indexOf(shown)) cellMarks[cell] = mark
   }
   const currentCell = current === null ? -1 : Math.floor(current / perCell)
   return (
@@ -262,7 +289,11 @@ const MARK_FILLS: Record<PageMark, string> = {
   touched: 'bg-heap',
   result: 'bg-result',
   fromIndex: 'bg-index',
+  bitmap: 'bg-intermediate',
 }
+
+/** Which mark a square for several pages shows: the last of theirs in this list. */
+const MARK_RANK: PageMark[] = ['bitmap', 'fromIndex', 'touched', 'result']
 
 /** The page the last step asked for or went through, if any. */
 function currentPage(state: PlaybackState): PageRef | null {

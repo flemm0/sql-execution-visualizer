@@ -13,6 +13,8 @@ let good: ValidationInput
 let goodIndexScan: ValidationInput
 /** The same for an Index Only Scan with a Filter. */
 let goodIndexOnlyScan: ValidationInput
+/** The same for a Bitmap Heap Scan over a Bitmap Index Scan. */
+let goodBitmapScan: ValidationInput
 
 beforeAll(async () => {
   db = await createDatabase()
@@ -30,6 +32,10 @@ beforeAll(async () => {
     { emptyCache: true },
   )
   goodIndexOnlyScan = asInput(indexOnlyScan)
+  const [bitmapScan] = await runStatementAt(db, 'SELECT * FROM orders WHERE customer_id BETWEEN 100 AND 120', 0, {
+    emptyCache: true,
+  })
+  goodBitmapScan = asInput(bitmapScan)
 }, 120_000)
 afterAll(() => db.close())
 
@@ -141,6 +147,32 @@ describe('the validator', () => {
       `${title}: rows`,
       `${title}: rows removed by filter`,
       'Result: rows',
+    ])
+  })
+
+  it('counts the rows a Bitmap Index Scan marks in its bitmap, and compares the heap pages read with Exact Heap Blocks', () => {
+    expect(validate(goodBitmapScan)).toMatchObject({ ok: true, notes: [] })
+    const index = 'Bitmap Index Scan on orders_customer_id_order_date_idx'
+    // An entry whose row isn't marked in the bitmap: one row fewer for the index scan.
+    const unmarkFirst = (events: TraceEvent[]) =>
+      events.map((event): TraceEvent => (event === events.find((each) => each.type === 'index.entry') ? { ...event, bitmap: undefined } : event))
+    expect(failedWith(unmarkFirst, {}, goodBitmapScan)).toEqual([`${index}: rows`])
+    // A heap page read twice: one more hit, and one more page than the bitmap has.
+    const readTwice = (events: TraceEvent[]) => {
+      const first = events.findIndex((event) => event.type === 'buffer.read' && event.node === 0)
+      const again = { ...events[first], type: 'buffer.hit' } as TraceEvent
+      return [...events.slice(0, first + 1), again, ...events.slice(first + 1)]
+    }
+    expect(failedWith(readTwice, {}, goodBitmapScan)).toEqual(['Bitmap Heap Scan on orders: buffer hits'])
+    // A heap page the bitmap doesn't mark: one more page, one more read.
+    const extraPage = (events: TraceEvent[]) => {
+      const first = events.findIndex((event) => event.type === 'buffer.read' && event.node === 0)
+      const page = { relation: (events[first] as { page: { relation: number } }).page.relation, block: 588 }
+      return [...events.slice(0, first), { type: 'buffer.read', node: 0, page } as TraceEvent, ...events.slice(first)]
+    }
+    expect(failedWith(extraPage, {}, goodBitmapScan)).toEqual([
+      'Bitmap Heap Scan on orders: exact heap blocks',
+      'Bitmap Heap Scan on orders: buffer reads',
     ])
   })
 
