@@ -66,6 +66,14 @@ export interface PlanNode {
   indexSearches: number | null
   /** How many rows an index-only scan fetched from the heap, because the visibility map didn't say their page was all-visible; null for other nodes. */
   heapFetches: number | null
+  /**
+   * For a bitmap heap scan, how many heap pages it read whose rows its bitmap
+   * lists one by one (exact), and how many the bitmap kept as a whole page,
+   * every row to be rechecked, because it outgrew work_mem (lossy). Per loop
+   * like actualRows; null for other nodes.
+   */
+  exactHeapBlocks: number | null
+  lossyHeapBlocks: number | null
   /** The values the node outputs, as expressions over its table, e.g. ["order_id", "(quantity * 2)"] (VERBOSE). */
   output: string[]
   children: PlanNode[]
@@ -184,6 +192,8 @@ function parseNode(node: JsonPlanNode, newId: () => number): PlanNode {
   const indexCond = node['Index Cond']
   const indexSearches = node['Index Searches']
   const heapFetches = node['Heap Fetches']
+  const exactHeapBlocks = node['Exact Heap Blocks']
+  const lossyHeapBlocks = node['Lossy Heap Blocks']
   return {
     id,
     title: nodeTitle(node),
@@ -206,6 +216,8 @@ function parseNode(node: JsonPlanNode, newId: () => number): PlanNode {
     backward: node['Scan Direction'] === 'Backward',
     indexSearches: typeof indexSearches === 'number' ? indexSearches : null,
     heapFetches: typeof heapFetches === 'number' ? heapFetches : null,
+    exactHeapBlocks: typeof exactHeapBlocks === 'number' ? exactHeapBlocks : null,
+    lossyHeapBlocks: typeof lossyHeapBlocks === 'number' ? lossyHeapBlocks : null,
     output: Array.isArray(node['Output']) ? (node['Output'] as string[]) : [],
     children: (node.Plans ?? []).map((child) => parseNode(child, newId)),
   }

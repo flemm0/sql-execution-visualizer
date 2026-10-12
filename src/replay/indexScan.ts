@@ -47,7 +47,7 @@ import { Unsupported } from './unsupported'
  */
 
 /** What fetching an index entry's heap row found. */
-interface FetchedRow {
+export interface FetchedRow {
   /** The version of the row the query can see (the one pointed at, or a newer one on its page), or null. */
   visible: Tid | null
   /** Whether it passed the Filter; false if nothing was visible. */
@@ -71,18 +71,19 @@ export interface IndexWalk {
 }
 
 /**
- * Walks an index scan's index as Postgres will (steps 1 and 2 above),
- * reading each page it reaches. Throws Unsupported for a scan the replay
- * can't handle yet.
+ * Walks an index scan's index as Postgres will (step 1 above), reading each
+ * page it reaches. `alias` is the name the query calls the table by, which
+ * the Index Cond uses (a bitmap index scan's node doesn't name its table:
+ * its parent does). Throws Unsupported for a scan the replay can't handle yet.
  */
-export async function walkIndexScan(db: PGliteInterface, node: PlanNode, index: Relation): Promise<IndexWalk> {
-  if (node.relation === null || node.indexName === null) throw new Error(`${node.title} names no index`)
+export async function walkIndexScan(db: PGliteInterface, node: PlanNode, index: Relation, alias: string): Promise<IndexWalk> {
+  if (node.indexName === null) throw new Error(`${node.title} names no index`)
   if (index.accessMethod !== 'btree') {
     throw new Unsupported(`Animation isn’t available yet for ${index.accessMethod} indexes.`)
   }
   if (node.backward) throw new Unsupported('Animation isn’t available yet for backward index scans.')
   const columns = await readIndexColumns(db, index)
-  const keys = parseIndexCond(node.indexCond, node.relation.alias, columns)
+  const keys = parseIndexCond(node.indexCond, alias, columns)
   return { indexName: node.indexName, indexCond: node.indexCond, ...(await walkBtree(db, index, columns, keys)) }
 }
 
@@ -272,9 +273,10 @@ function topLevel(text: string): number[] {
 /**
  * Asks Postgres which of these rows the query can see, and whether they pass
  * the node's Filter. A row updated in place (a HOT update) is followed to the
- * version the query can see, through its page's line pointers.
+ * version the query can see, through its page's line pointers. Results are
+ * keyed by tidText.
  */
-async function fetchRows(
+export async function fetchRows(
   db: PGliteInterface,
   node: PlanNode,
   table: Relation,
@@ -437,6 +439,6 @@ function unique<T>(items: T[]): T[] {
 }
 
 /** A tid as Postgres writes it, "(12,3)". */
-function tidText(tid: Tid) {
+export function tidText(tid: Tid) {
   return `(${tid.block},${tid.offset})`
 }

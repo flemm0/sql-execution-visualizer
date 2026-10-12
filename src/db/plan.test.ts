@@ -129,6 +129,20 @@ describe('index scan nodes', () => {
     expect(scan).toMatchObject({ nodeType: 'Index Only Scan', indexName: 'orders_customer_id_order_date_idx', heapFetches: 0 })
     expect((await planFor('SELECT * FROM orders WHERE id = 4242')).root.heapFetches).toBeNull()
   })
+
+  it('carry a bitmap heap scan’s exact and lossy heap blocks, and its bitmap index scan’s index and searches', async () => {
+    const heapScan = (await planFor('SELECT * FROM orders WHERE customer_id BETWEEN 100 AND 300')).root
+    expect(heapScan).toMatchObject({ nodeType: 'Bitmap Heap Scan', exactHeapBlocks: 480, lossyHeapBlocks: 0, indexName: null })
+    expect(heapScan.children[0]).toMatchObject({
+      nodeType: 'Bitmap Index Scan',
+      relation: null,
+      indexName: 'orders_customer_id_order_date_idx',
+      indexCond: '((orders.customer_id >= 100) AND (orders.customer_id <= 300))',
+      indexSearches: 1,
+      exactHeapBlocks: null,
+    })
+    expect((await planFor('SELECT * FROM orders WHERE id = 4242')).root.exactHeapBlocks).toBeNull()
+  })
 })
 
 describe('tablesInPlan', () => {

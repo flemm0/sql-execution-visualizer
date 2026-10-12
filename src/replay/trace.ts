@@ -107,7 +107,11 @@ export interface IndexVisitEvent {
   downlink: number | null
 }
 
-/** An index entry on a leaf page matches the scan's conditions. It points at a heap row. */
+/**
+ * An index entry on a leaf page matches the scan's conditions. It points at a
+ * heap row. A bitmap index scan doesn't fetch that row: it marks it in a
+ * bitmap, which its parent reads the heap with once the index scan is done.
+ */
 export interface IndexEntryEvent {
   type: 'index.entry'
   node: number
@@ -118,6 +122,8 @@ export interface IndexEntryEvent {
   key: (string | null)[]
   /** The heap row it points at. */
   row: RowRef
+  /** True for a bitmap index scan: the row is marked in its bitmap. Absent for other index scans. */
+  bitmap?: true
 }
 
 /**
@@ -194,6 +200,15 @@ export type TraceEvent =
   | HeapTupleEvent
   | VisibilityCheckEvent
   | RowEmitEvent
+
+/**
+ * Whether an event passes a row on from its node: a row.emit, to its parent
+ * or to the result, or a bitmap index scan marking a row in the bitmap it
+ * hands to its parent. These are the rows Postgres counts for the node.
+ */
+export function passesRowOn(event: TraceEvent): boolean {
+  return event.type === 'row.emit' || (event.type === 'index.entry' && event.bitmap === true)
+}
 
 /**
  * One item of an index page, as the scan found it: on a leaf page, an entry

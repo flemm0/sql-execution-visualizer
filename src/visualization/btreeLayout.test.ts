@@ -43,7 +43,7 @@ function view(path: IndexView['path'], matchedOffsets: number[] = []): IndexView
     searches: 1,
     path,
     leaf: path.at(-1)?.level === 0 ? (path.at(-1)?.page ?? null) : null,
-    entries: matchedOffsets.map((offset) => ({ offset, key: [], row: { relation: 10, block: 50, offset: 3 } })),
+    entries: matchedOffsets.map((offset) => ({ offset, key: [], row: { relation: 10, block: 50, offset: 3 }, bitmap: false })),
     entryCount: matchedOffsets.length,
     matchedOffsets,
     markedDead: 0,
@@ -119,7 +119,13 @@ describe('laying out the B-tree', () => {
     expect(keys.find((cell) => cell.mark === 'current')?.text).toBe('4242')
     expect(child.cells.at(-1)).toMatchObject({ kind: 'ellipsis', text: '…293…' })
     const current = keys[2]
-    expect(layout.rowPointer).toMatchObject({ x: child.x + current.x + current.width / 2, text: 'heap row (50,3)' })
+    expect(layout.rowPointer).toMatchObject({ x: child.x + current.x + current.width / 2, text: 'heap row (50,3)', kind: 'heap' })
+  })
+
+  it('points a bitmap index scan’s match into the bitmap, not at the heap', () => {
+    const marking = { ...walked, entries: walked.entries.map((entry) => ({ ...entry, bitmap: true })) }
+    const layout = layoutBtree(input({ view: marking, pages, currentEntry: 4, current: page(112) }))
+    expect(layout.rowPointer).toMatchObject({ text: 'bitmap: row (50,3)', kind: 'bitmap' })
   })
 
   it('shows fewer keys when the width is short, never fewer than the one in focus', () => {

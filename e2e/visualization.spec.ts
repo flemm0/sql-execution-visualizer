@@ -253,3 +253,48 @@ test('example 9: an index-only scan reads the visibility map, not the heap, unti
   await control(page, 'To the end').click()
   await expect(viz(page).getByTestId('viz-all-visible')).toHaveText('· all-visible: not read, rows from the index')
 })
+
+test('example 6: a bitmap scan marks every matching row first, then reads each of their heap pages once, in physical order', async ({ page }) => {
+  await openApp(page)
+  await runSql(page, 'SELECT * FROM orders WHERE customer_id BETWEEN 100 AND 300;')
+  await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres')
+  await control(page, 'Pause').click()
+  const minimap = (mark: string) => viz(page).locator(`[data-testid="viz-minimap"] [data-mark="${mark}"]`)
+
+  // Both nodes start, the search reads 4 index pages (an access and a visit each), then 944 entries match: step 955.
+  await page.getByRole('slider', { name: 'Timeline' }).fill('955')
+  await expect(caption(page)).toContainText(/^Entry .+ matches; the scan marks its row, \(\d+,\d+\), in the bitmap instead of fetching it/)
+  await expect(viz(page).getByTestId('viz-node')).toContainText('Bitmap Index Scan on orders_customer_id_order_date_idx')
+  await expect(viz(page).getByTestId('viz-rows')).toHaveText(/^rows: 944 so far/)
+  // The bitmap so far: violet on the mini-map, and no heap page read yet.
+  await expect(viz(page).getByTestId('viz-bitmap')).toHaveText('bitmap: 944 rows on 480 pages')
+  await expect(minimap('bitmap')).toHaveCount(480)
+  await expect(viz(page).getByTestId('viz-heap-page')).toHaveCount(0)
+  await expect(viz(page).getByTestId('viz-btree-row')).toHaveAttribute('data-kind', 'bitmap')
+  await expect(viz(page).getByTestId('viz-btree-row')).toHaveText(/^bitmap: row \(\d+,\d+\)$/)
+  // The plan tree: the heap scan is busy waiting on its child, which counts the rows it marked.
+  const planNode = page.getByTestId('plan-node')
+  await expect(planNode).toHaveCount(2)
+  await expect(planNode.nth(0)).toHaveAttribute('data-status', 'active')
+  await expect(planNode.nth(1).getByTestId('plan-rows')).toHaveText(/^rows 944 so far of 944 · est\. \d+$/)
+
+  await control(page, 'Step forward').click()
+  await expect(caption(page)).toHaveText(
+    'Bitmap Index Scan on orders_customer_id_order_date_idx is done: its bitmap marks 944 rows on 480 heap pages. Bitmap Heap Scan on orders reads those pages next, in physical order, each one once.',
+  )
+  await expect(planNode.nth(1)).toHaveAttribute('data-status', 'done')
+  await control(page, 'Step forward').click()
+  await expect(caption(page)).toHaveText(
+    /^Heap page \d+, page 1 of 480 in the bitmap, has \d+ rows? marked\. It isn’t in shared buffers, so it’s read from disk into a buffer\.$/,
+  )
+  await expect(viz(page).getByTestId('viz-node')).toContainText('Bitmap Heap Scan on orders')
+  await expect(viz(page).getByTestId('viz-bitmap-rows')).toHaveText(/· \d+ rows? marked in the bitmap$/)
+  await expect(viz(page).getByTestId('viz-bitmap')).toHaveText('bitmap: 944 rows on 480 pages · 1 of 480 read')
+  await expect(minimap('bitmap')).toHaveCount(479)
+
+  await control(page, 'To the end').click()
+  await expect(caption(page)).toHaveText('Bitmap Heap Scan on orders has no more rows: it sent 944 rows to the result.')
+  await expect(viz(page).getByTestId('viz-bitmap')).toHaveText('bitmap: 944 rows on 480 pages · 480 of 480 read')
+  await expect(minimap('bitmap')).toHaveCount(0)
+  await expect(minimap('result')).toHaveCount(480)
+})

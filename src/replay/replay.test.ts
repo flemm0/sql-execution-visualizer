@@ -661,6 +661,22 @@ describe('replaying an Index Scan with a list of values, or a skip scan', () => 
   })
 })
 
+describe('example 5: selectivity', () => {
+  it('with an index on status, the rare value is an Index Scan and the common one a Seq Scan; both replay', async () => {
+    await db.exec('CREATE INDEX orders_status_idx ON orders (status)')
+    try {
+      const rare = await replayed(`SELECT * FROM orders WHERE status = 'pending'`)
+      expect(rare.result.plan?.root.title).toBe('Index Scan using orders_status_idx on orders')
+      expect(rare.result.totalRows).toBe(1498)
+      const common = await replayed(`SELECT * FROM orders WHERE status = 'delivered'`)
+      expect(common.result.plan?.root.title).toBe('Seq Scan on orders')
+      expect(common.result.totalRows).toBe(45000)
+    } finally {
+      await db.exec('DROP INDEX orders_status_idx')
+    }
+  })
+})
+
 describe('a replay that can’t match', () => {
   it('a volatile filter picks other rows each time, and the validator says so', async () => {
     // random() is evaluated anew by EXPLAIN ANALYZE, the query, and the replay's own query.

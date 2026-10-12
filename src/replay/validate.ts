@@ -1,13 +1,14 @@
 import type { Plan, PlanNode } from '../db/plan'
-import type { Trace } from './trace'
+import { passesRowOn, type PageRef, type Trace } from './trace'
 
 /*
  * The validator checks a replay against what Postgres reported: each node's
  * row count, rows removed by its filter, searches down an index (Postgres
  * 18's "Index Searches"), rows an index-only scan fetched from the heap
- * ("Heap Fetches"), and buffer hits and reads from
- * EXPLAIN ANALYZE, and the rows sent to the result against the real result.
- * The animation plays either way; a failed check is shown as a warning.
+ * ("Heap Fetches"), heap pages a bitmap heap scan read ("Exact Heap
+ * Blocks"), and buffer hits and reads from EXPLAIN ANALYZE, and the rows
+ * sent to the result against the real result. The animation plays either
+ * way; a failed check is shown as a warning.
  */
 
 /** One comparison between Postgres's number and the replay's. */
@@ -57,13 +58,8 @@ export function validate(input: ValidationInput): Validation {
     const subtree = new Set(allNodes(node).map((child) => child.id))
     const buffers = trace.events.filter((event) => subtree.has(event.node))
 
-    checks.push(
-      check(
-        `${node.title}: rows`,
-        Math.round(node.actualRows * node.loops),
-        own.filter((event) => event.type === 'row.emit').length,
-      ),
-    )
+    // A bitmap index scan's rows are the rows it marks in its bitmap.
+    checks.push(check(`${node.title}: rows`, Math.round(node.actualRows * node.loops), own.filter(passesRowOn).length))
     if (node.rowsRemovedByFilter !== null) {
       let removed = 0
       for (const event of own) {
@@ -82,6 +78,14 @@ export function validate(input: ValidationInput): Validation {
       const fetches = own.filter((event) => event.type === 'heap.tuple').length
       checks.push(check(`${node.title}: heap fetches`, Math.round(node.heapFetches * node.loops), fetches))
     }
+    if (node.exactHeapBlocks !== null) {
+      // A bitmap heap scan's own page accesses are the heap pages its bitmap marks, each once.
+      const pages = new Set<string>()
+      for (const event of own) {
+        if (event.type === 'buffer.hit' || event.type === 'buffer.read') pages.add(pageKey(event.page))
+      }
+      checks.push(check(`${node.title}: exact heap blocks`, Math.round(node.exactHeapBlocks * node.loops), pages.size))
+    }
     checks.push(check(`${node.title}: buffer hits`, node.sharedHit, buffers.filter((e) => e.type === 'buffer.hit').length))
     checks.push(check(`${node.title}: buffer reads`, node.sharedRead, buffers.filter((e) => e.type === 'buffer.read').length))
   }
@@ -99,6 +103,10 @@ export function validate(input: ValidationInput): Validation {
   }
 
   return { ok: checks.every((each) => each.ok), checks, notes }
+}
+
+function pageKey(page: PageRef) {
+  return `${page.relation}/${page.fork ?? 'main'}/${page.block}`
 }
 
 function check(label: string, postgres: number, replay: number): Check {

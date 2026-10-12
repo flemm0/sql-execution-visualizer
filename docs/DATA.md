@@ -57,13 +57,13 @@ All single-table, matching v1 scope. The "expected plan" column is a hypothesis;
 |---|---|---|---|
 | 1 | Primary-key lookup | `orders WHERE id = 4242` | Index Scan: walk down the B-tree, then fetch one heap row |
 | 2 | No usable index | `order_items WHERE product_id = 42` | Seq Scan over the big table |
-| 3 | Adding an index changes the plan | `CREATE INDEX ON order_items (product_id)`, rerun #2 | Bitmap or Index Scan |
+| 3 | Adding an index changes the plan | `CREATE INDEX ON order_items (product_id)`, rerun #2 | Bitmap Heap Scan over a Bitmap Index Scan on `order_items_product_id_idx` (checked): 177 heap pages instead of all 1,278 |
 | 4 | Range scan | `orders WHERE id BETWEEN 1000 AND 2000` | Index Scan walking leaf pages sideways |
-| 5 | Selectivity | Index `orders(status)`; `'pending'` vs. `'delivered'` | Index for the rare value; Seq Scan for the common one |
-| 6 | Bitmap scan | `orders WHERE customer_id BETWEEN 100 AND 300` | Bitmap Index Scan + Bitmap Heap Scan (each heap page read once, in physical order) |
+| 5 | Selectivity | Index `orders(status)`; `'pending'` vs. `'delivered'` | Index Scan on `orders_status_idx` for the rare value (1,498 rows); Seq Scan for the common one (45,000 rows) (checked) |
+| 6 | Bitmap scan | `orders WHERE customer_id BETWEEN 100 AND 300` | Bitmap Index Scan + Bitmap Heap Scan (checked): 944 rows marked in the bitmap, then each of their 480 heap pages read once, in physical order |
 | 7 | Functions hide columns | `customers WHERE lower(email) = '…'`, then an expression index | Seq Scan → Index Scan |
 | 8 | Column order in a multi-column index | `WHERE last_name = …` vs. `WHERE first_name = …` | Index Scan vs. Seq Scan, or Postgres 18 skip scan |
 | 9 | Index Only Scan and the visibility map | `SELECT order_date FROM orders WHERE customer_id = 42`; `UPDATE orders SET total = total WHERE customer_id = 42`; run it twice; `VACUUM orders`; run it again | Index Only Scan on `orders_customer_id_order_date_idx` (checked): heap fetches 0 → 6 (old and new versions' entries) → 3 (the old ones were marked dead) → 0 |
 | 10 | Top-N | `WHERE customer_id = 42 ORDER BY order_date DESC LIMIT 3` vs. `ORDER BY total DESC LIMIT 10` | Backward index scan with no sort vs. Sort |
 | 11 | Tiny tables | `categories WHERE id = 3` | Seq Scan despite the primary key |
-| 12 | Clustering factor | `orders WHERE id BETWEEN 1 AND 500` vs. `WHERE customer_id BETWEEN 1 AND 100` | Similar row counts; a handful of heap pages vs. hundreds |
+| 12 | Clustering factor | `orders WHERE id BETWEEN 1 AND 500` vs. `WHERE customer_id BETWEEN 1 AND 100` | Index Scan over 6 heap pages for 500 rows vs. a bitmap scan over 312 heap pages for 468 rows (checked; an Index Scan of the latter reads the same 312 and comes back to them 154 times) |

@@ -3,6 +3,7 @@ import { readVisibilityMap, type CacheSnapshot, type Relation, type VisibilityMa
 import type { Plan, PlanNode } from '../db/plan'
 import { query, queryText } from '../db/query'
 import { quoteIdentifier } from '../db/sql'
+import { replayBitmapScan } from './bitmapScan'
 import { SharedBuffers } from './buffers'
 import { entryTids, replayIndexScan, walkIndexScan, type IndexWalk } from './indexScan'
 import { scanPages, seqScanEvents } from './seqScan'
@@ -40,9 +41,9 @@ export interface ReplayInput {
 
 /**
  * What the replay found before the query ran: an index scan's walk of its
- * index (and for an Index Only Scan, the table's visibility map, null for an
- * Index Scan), or the error that stopped it (Unsupported, for one), to report
- * with the replay.
+ * index (and for an Index Only Scan, the table's visibility map, null for
+ * other index scans), or the error that stopped it (Unsupported, for one), to
+ * report with the replay.
  */
 export type Prepared = WalkedIndex | { status: 'error'; error: unknown }
 
@@ -53,55 +54,92 @@ export interface WalkedIndex {
 }
 
 /** Node types the replay engine can replay. */
-const REPLAYABLE = new Set(['Seq Scan', 'Index Scan', 'Index Only Scan'])
+const REPLAYABLE = new Set(['Seq Scan', 'Index Scan', 'Index Only Scan', 'Bitmap Heap Scan', 'Bitmap Index Scan'])
 
-/** Node types that read a B-tree index. */
+/** Node types that read a B-tree index and fetch the rows its entries point at. */
 const INDEX_SCANS = new Set(['Index Scan', 'Index Only Scan'])
+
+/**
+ * The plan shapes the replay engine can replay: one scan, or a Bitmap Heap
+ * Scan reading the bitmap of one Bitmap Index Scan. For each, the node that
+ * reads the table, and the one that reads an index (the same node for an
+ * index scan; null for a Seq Scan). Null for any other shape: a scan with
+ * children runs a subquery for a condition (an InitPlan or SubPlan).
+ */
+function planScans(root: PlanNode): { tableScan: PlanNode; indexScan: PlanNode | null } | null {
+  if (root.nodeType === 'Bitmap Heap Scan') {
+    const [child] = root.children
+    const single = root.children.length === 1 && child.nodeType === 'Bitmap Index Scan' && child.children.length === 0
+    return single ? { tableScan: root, indexScan: child } : null
+  }
+  if (root.children.length > 0) return null
+  return { tableScan: root, indexScan: INDEX_SCANS.has(root.nodeType) ? root : null }
+}
 
 /**
  * The part of a replay that has to happen before the query runs (in the
  * order of ARCHITECTURE.md, after the cache snapshot and before execution).
  * Running an index scan can change its index: it marks entries whose rows
  * nobody can see any more as dead, and later scans skip them. So an index
- * scan's index is walked first, as the query will find it. An Index Only
- * Scan also reads the visibility map bits of the heap pages its entries
- * point into, as the query will find them. `plan` comes from a plain EXPLAIN
- * (VERBOSE). Reading the pages loads them into shared buffers, so the caller
- * evicts them again before running the query.
+ * scan's index is walked first, as the query will find it; a Bitmap Index
+ * Scan's too, though it marks nothing dead, so every replay sees its index
+ * the same way. An Index Only Scan also reads the visibility map bits of the
+ * heap pages its entries point into, as the query will find them. `plan`
+ * comes from a plain EXPLAIN (VERBOSE). Reading the pages loads them into
+ * shared buffers, so the caller evicts them again before running the query.
  *
  * Returns null when there's nothing to do before the query runs.
  */
 export async function prepareReplay(db: PGliteInterface, plan: Plan, relations: Relation[]): Promise<Prepared | null> {
-  const root = plan.root
-  if (!INDEX_SCANS.has(root.nodeType) || root.children.length > 0) return null
-  const found = scanRelations(root, relations)
+  const scans = planScans(plan.root)
+  if (scans === null || scans.indexScan === null) return null
+  const found = scanRelations(scans.tableScan, scans.indexScan, relations)
   if (found === null || found.index === null) return null
   try {
-    return await walkIndex(db, root, found.table, found.index)
+    return await walkIndex(db, scans.indexScan, scans.tableScan, found.table, found.index)
   } catch (error) {
     return { status: 'error', error }
   }
 }
 
-/** Walks an index scan's index, and for an Index Only Scan reads the visibility map too. */
-async function walkIndex(db: PGliteInterface, node: PlanNode, table: Relation, index: Relation): Promise<WalkedIndex> {
-  const walk = await walkIndexScan(db, node, index)
+/**
+ * Walks an index scan's index, and for an Index Only Scan reads the
+ * visibility map too. `tableScan` is the node that reads the table: the
+ * index scan itself, or a Bitmap Index Scan's parent.
+ */
+async function walkIndex(
+  db: PGliteInterface,
+  indexScan: PlanNode,
+  tableScan: PlanNode,
+  table: Relation,
+  index: Relation,
+): Promise<WalkedIndex> {
+  if (tableScan.relation === null) throw new Error(`${tableScan.title} names no table`)
+  const walk = await walkIndexScan(db, indexScan, index, tableScan.relation.alias)
   const visibilityMap =
-    node.nodeType === 'Index Only Scan'
+    indexScan.nodeType === 'Index Only Scan'
       ? await readVisibilityMap(db, table, entryTids(walk).map((tid) => tid.block))
       : null
   return { status: 'walked', walk, visibilityMap }
 }
 
-/** The table a scan reads, and the index it reads it through; null for a table not among the relations (a temporary table). */
-function scanRelations(node: PlanNode, relations: Relation[]): { table: Relation; index: Relation | null } | null {
+/**
+ * The table a scan reads, and the index it reads it through (`indexScan`
+ * names it; null for a Seq Scan); null for a table not among the relations
+ * (a temporary table).
+ */
+function scanRelations(
+  tableScan: PlanNode,
+  indexScan: PlanNode | null,
+  relations: Relation[],
+): { table: Relation; index: Relation | null } | null {
   // A table and an index can't share a name in a schema, so the name is enough.
   const table = relations.find(
-    (relation) => relation.schema === node.relation?.schema && relation.name === node.relation?.name,
+    (relation) => relation.schema === tableScan.relation?.schema && relation.name === tableScan.relation?.name,
   )
   if (!table) return null
   // An index lives in its table's schema.
-  const index = relations.find((relation) => relation.schema === table.schema && relation.name === node.indexName)
+  const index = relations.find((relation) => relation.schema === table.schema && relation.name === indexScan?.indexName)
   return { table, index: index ?? null }
 }
 
@@ -116,9 +154,9 @@ export async function replayQuery(db: PGliteInterface, input: ReplayInput): Prom
   const root = plan.root
   const missing = allNodes(root).find((node) => !REPLAYABLE.has(node.nodeType))
   if (missing) return { status: 'unsupported', reason: `Animation isn’t available yet for ${missing.nodeType}.` }
-  // A scan with children runs a subquery for a condition (an InitPlan or SubPlan).
-  if (root.children.length > 0) return { status: 'unsupported', reason: 'Animation isn’t available yet for subqueries.' }
-  const found = scanRelations(root, relations)
+  const scans = planScans(root)
+  if (scans === null) return { status: 'unsupported', reason: 'Animation isn’t available yet for subqueries.' }
+  const found = scanRelations(scans.tableScan, scans.indexScan, relations)
   if (found === null) {
     return {
       status: 'unsupported',
@@ -134,12 +172,17 @@ export async function replayQuery(db: PGliteInterface, input: ReplayInput): Prom
     const notes: string[] = []
     let skipScan = false
     let indexPages: IndexPageContents[] = []
-    if (INDEX_SCANS.has(root.nodeType)) {
-      if (index === null) throw new Error(`${root.title}: no index ${root.indexName}`)
-      const { walk, visibilityMap } = await indexWalk(db, root, table, index, input.prepared)
+    const indexScan = scans.indexScan
+    if (indexScan !== null) {
+      if (index === null) throw new Error(`${indexScan.title}: no index ${indexScan.indexName}`)
+      if (root.lossyHeapBlocks !== null && root.lossyHeapBlocks > 0) throw new Unsupported(LOSSY_REASON)
+      const { walk, visibilityMap } = await indexWalk(db, indexScan, root, table, index, input.prepared)
       skipScan = walk.skipScan
       indexPages = walk.pages
-      events = await replayIndexScan(db, root, table, index, walk, visibilityMap, buffers)
+      events =
+        indexScan === root
+          ? await replayIndexScan(db, root, table, index, walk, visibilityMap, buffers)
+          : await replayBitmapScan(db, root, indexScan, table, index, walk, buffers)
     } else {
       events = [...seqScanEvents(root, table, await scanPages(db, root, table), buffers)]
       notes.push(...(await ringBufferNotes(db, table)))
@@ -179,6 +222,14 @@ export async function replayQuery(db: PGliteInterface, input: ReplayInput): Prom
 }
 
 /**
+ * Why a bitmap heap scan isn't replayed when its bitmap went lossy: which
+ * pages the bitmap keeps whole depends on how its hash table fills up,
+ * which the replay doesn't model.
+ */
+export const LOSSY_REASON =
+  'Animation isn’t available yet for lossy bitmaps: this bitmap outgrew work_mem, so for some heap pages it kept only the page, and Postgres rechecked every row on them.'
+
+/**
  * Why a skip scan can count more buffer hits than its replay: the first
  * skip scan over a type in a session looks up in the system catalogs how to
  * step through its values (an operator class's skip support), and Postgres
@@ -201,7 +252,8 @@ function onlyMoreHits(validation: Validation) {
  */
 async function indexWalk(
   db: PGliteInterface,
-  node: PlanNode,
+  indexScan: PlanNode,
+  tableScan: PlanNode,
   table: Relation,
   index: Relation,
   prepared: Prepared | null,
@@ -209,13 +261,13 @@ async function indexWalk(
   if (prepared?.status === 'error') throw prepared.error
   if (
     prepared?.status === 'walked' &&
-    prepared.walk.indexName === node.indexName &&
-    prepared.walk.indexCond === node.indexCond &&
-    (prepared.visibilityMap !== null) === (node.nodeType === 'Index Only Scan')
+    prepared.walk.indexName === indexScan.indexName &&
+    prepared.walk.indexCond === indexScan.indexCond &&
+    (prepared.visibilityMap !== null) === (indexScan.nodeType === 'Index Only Scan')
   ) {
     return prepared
   }
-  return walkIndex(db, node, table, index)
+  return walkIndex(db, indexScan, tableScan, table, index)
 }
 
 /** The rows sent to the result, in result order. */
