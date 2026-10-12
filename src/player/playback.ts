@@ -494,3 +494,16 @@ export function formatIndexKey(key: (string | null)[], keyColumns: number): stri
   while (values.length < keyColumns) values.push('−∞')
   return values.length === 1 ? values[0] : `(${values.join(', ')})`
 }
+
+/** Steps per second, or 'instant' to jump straight to the end. */
+export type Speed = number | 'instant'
+
+/**
+ * Where a newly loaded trace starts: with autoplay on, playing from step 0
+ * (at instant speed, already at its end); with autoplay off, paused at step 0,
+ * whatever the speed.
+ */
+export function startOfTrace(steps: number, speed: Speed, autoplay: boolean): { position: number; playing: boolean } {
+  if (!autoplay) return { position: 0, playing: false }
+  return { position: speed === 'instant' ? steps : 0, playing: true }
+}
