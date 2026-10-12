@@ -1,10 +1,10 @@
 import type { PGliteInterface } from '@electric-sql/pglite'
-import type { CacheSnapshot, Relation } from '../db/inspector'
+import { readVisibilityMap, type CacheSnapshot, type Relation, type VisibilityMap } from '../db/inspector'
 import type { Plan, PlanNode } from '../db/plan'
 import { query, queryText } from '../db/query'
 import { quoteIdentifier } from '../db/sql'
 import { SharedBuffers } from './buffers'
-import { replayIndexScan, walkIndexScan, type IndexWalk } from './indexScan'
+import { entryTids, replayIndexScan, walkIndexScan, type IndexWalk } from './indexScan'
 import { scanPages, seqScanEvents } from './seqScan'
 import type { IndexPageContents, RowRef, Trace, TraceEvent } from './trace'
 import { Unsupported } from './unsupported'
@@ -40,35 +40,57 @@ export interface ReplayInput {
 
 /**
  * What the replay found before the query ran: an index scan's walk of its
- * index, or the error that stopped it (Unsupported, for one), to report with
- * the replay.
+ * index (and for an Index Only Scan, the table's visibility map, null for an
+ * Index Scan), or the error that stopped it (Unsupported, for one), to report
+ * with the replay.
  */
-export type Prepared = { status: 'walked'; walk: IndexWalk } | { status: 'error'; error: unknown }
+export type Prepared = WalkedIndex | { status: 'error'; error: unknown }
+
+export interface WalkedIndex {
+  status: 'walked'
+  walk: IndexWalk
+  visibilityMap: VisibilityMap | null
+}
 
 /** Node types the replay engine can replay. */
-const REPLAYABLE = new Set(['Seq Scan', 'Index Scan'])
+const REPLAYABLE = new Set(['Seq Scan', 'Index Scan', 'Index Only Scan'])
+
+/** Node types that read a B-tree index. */
+const INDEX_SCANS = new Set(['Index Scan', 'Index Only Scan'])
 
 /**
  * The part of a replay that has to happen before the query runs (in the
  * order of ARCHITECTURE.md, after the cache snapshot and before execution).
  * Running an index scan can change its index: it marks entries whose rows
  * nobody can see any more as dead, and later scans skip them. So an index
- * scan's index is walked first, as the query will find it. `plan` comes from
- * a plain EXPLAIN (VERBOSE). Reading the pages loads them into shared
- * buffers, so the caller evicts them again before running the query.
+ * scan's index is walked first, as the query will find it. An Index Only
+ * Scan also reads the visibility map bits of the heap pages its entries
+ * point into, as the query will find them. `plan` comes from a plain EXPLAIN
+ * (VERBOSE). Reading the pages loads them into shared buffers, so the caller
+ * evicts them again before running the query.
  *
  * Returns null when there's nothing to do before the query runs.
  */
 export async function prepareReplay(db: PGliteInterface, plan: Plan, relations: Relation[]): Promise<Prepared | null> {
   const root = plan.root
-  if (root.nodeType !== 'Index Scan' || root.children.length > 0) return null
+  if (!INDEX_SCANS.has(root.nodeType) || root.children.length > 0) return null
   const found = scanRelations(root, relations)
   if (found === null || found.index === null) return null
   try {
-    return { status: 'walked', walk: await walkIndexScan(db, root, found.index) }
+    return await walkIndex(db, root, found.table, found.index)
   } catch (error) {
     return { status: 'error', error }
   }
+}
+
+/** Walks an index scan's index, and for an Index Only Scan reads the visibility map too. */
+async function walkIndex(db: PGliteInterface, node: PlanNode, table: Relation, index: Relation): Promise<WalkedIndex> {
+  const walk = await walkIndexScan(db, node, index)
+  const visibilityMap =
+    node.nodeType === 'Index Only Scan'
+      ? await readVisibilityMap(db, table, entryTids(walk).map((tid) => tid.block))
+      : null
+  return { status: 'walked', walk, visibilityMap }
 }
 
 /** The table a scan reads, and the index it reads it through; null for a table not among the relations (a temporary table). */
@@ -112,12 +134,12 @@ export async function replayQuery(db: PGliteInterface, input: ReplayInput): Prom
     const notes: string[] = []
     let skipScan = false
     let indexPages: IndexPageContents[] = []
-    if (root.nodeType === 'Index Scan') {
+    if (INDEX_SCANS.has(root.nodeType)) {
       if (index === null) throw new Error(`${root.title}: no index ${root.indexName}`)
-      const walk = await indexWalk(db, root, index, input.prepared)
+      const { walk, visibilityMap } = await indexWalk(db, root, table, index, input.prepared)
       skipScan = walk.skipScan
       indexPages = walk.pages
-      events = await replayIndexScan(db, root, table, index, walk, buffers)
+      events = await replayIndexScan(db, root, table, index, walk, visibilityMap, buffers)
     } else {
       events = [...seqScanEvents(root, table, await scanPages(db, root, table), buffers)]
       notes.push(...(await ringBufferNotes(db, table)))
@@ -175,14 +197,25 @@ function onlyMoreHits(validation: Validation) {
 /**
  * The index scan's walk from before the query ran, if it was for the plan
  * that ran (EXPLAIN ANALYZE plans again, and could in theory pick another
- * index); otherwise a walk now. Rethrows the error that stopped it.
+ * index or node type); otherwise a walk now. Rethrows the error that stopped it.
  */
-async function indexWalk(db: PGliteInterface, node: PlanNode, index: Relation, prepared: Prepared | null) {
+async function indexWalk(
+  db: PGliteInterface,
+  node: PlanNode,
+  table: Relation,
+  index: Relation,
+  prepared: Prepared | null,
+): Promise<WalkedIndex> {
   if (prepared?.status === 'error') throw prepared.error
-  if (prepared?.status === 'walked' && prepared.walk.indexName === node.indexName && prepared.walk.indexCond === node.indexCond) {
-    return prepared.walk
+  if (
+    prepared?.status === 'walked' &&
+    prepared.walk.indexName === node.indexName &&
+    prepared.walk.indexCond === node.indexCond &&
+    (prepared.visibilityMap !== null) === (node.nodeType === 'Index Only Scan')
+  ) {
+    return prepared
   }
-  return walkIndexScan(db, node, index)
+  return walkIndex(db, node, table, index)
 }
 
 /** The rows sent to the result, in result order. */

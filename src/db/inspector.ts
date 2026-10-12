@@ -370,6 +370,52 @@ export async function readHeapPages(db: PGliteInterface, table: Relation, blocks
 
 const LINE_POINTER_STATES: HeapItem['state'][] = ['unused', 'normal', 'redirect', 'dead']
 
+/**
+ * What a table's visibility map said about some of its heap pages: which
+ * are all-visible (every row on them is visible to every transaction, so an
+ * index-only scan can skip fetching their rows), and how many pages the map
+ * itself has. VACUUM sets a page's bit; any change to the page clears it.
+ */
+export interface VisibilityMap {
+  /** The map's size in pages: 0 when the table has none yet (never vacuumed). */
+  pages: number
+  /** How many heap pages one map page covers: two bits each, in a page minus its 24-byte header. */
+  heapPagesPerMapPage: number
+  /** The heap pages asked about that are all-visible. */
+  allVisible: Set<number>
+}
+
+/**
+ * Reads the visibility map's bits for these heap pages of a table, decoded
+ * from its raw pages (visibilitymap.c): after the page header, two bits per
+ * heap page, the lower one "all-visible". A heap page past the end of the
+ * map isn't all-visible.
+ */
+export async function readVisibilityMap(db: PGliteInterface, table: Relation, blocks: number[]): Promise<VisibilityMap> {
+  const size = await query<{ pages: number; block_size: number }>(db, `
+    SELECT (pg_relation_size(${table.oid}::regclass, 'vm') / current_setting('block_size')::int)::int AS pages,
+      current_setting('block_size')::int AS block_size
+  `)
+  const { pages, block_size: blockSize } = size.rows[0]
+  const heapPagesPerMapPage = (blockSize - VM_HEADER_BYTES) * 4
+  const inMap = unique(blocks).filter((block) => Math.floor(block / heapPagesPerMapPage) < pages)
+  const allVisible = new Set<number>()
+  if (inMap.length === 0) return { pages, heapPagesPerMapPage, allVisible }
+  const result = await query<{ block: number; all_visible: boolean }>(db, `
+    SELECT p.block::int AS block,
+      get_byte(
+        get_raw_page(${relationName(table)}, 'vm', p.block / ${heapPagesPerMapPage}),
+        (${VM_HEADER_BYTES} + (p.block % ${heapPagesPerMapPage}) / 4)::int
+      ) >> (2 * (p.block % 4)::int) & 1 = 1 AS all_visible
+    FROM unnest(${intArray(inMap)}) AS p(block)
+  `)
+  for (const row of result.rows) if (row.all_visible) allVisible.add(row.block)
+  return { pages, heapPagesPerMapPage, allVisible }
+}
+
+/** A visibility map page's header, before its bits: the standard page header, rounded up to 8 bytes. */
+const VM_HEADER_BYTES = 24
+
 /** Reads a B-tree index's metapage with bt_metap. */
 export async function readBtreeMeta(db: PGliteInterface, index: Relation): Promise<BtreeMeta> {
   const result = await query<{ root: number; level: number; fastroot: number; fastlevel: number }>(

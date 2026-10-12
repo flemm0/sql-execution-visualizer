@@ -63,7 +63,7 @@ All single-table, matching v1 scope. The "expected plan" column is a hypothesis;
 | 6 | Bitmap scan | `orders WHERE customer_id BETWEEN 100 AND 300` | Bitmap Index Scan + Bitmap Heap Scan (each heap page read once, in physical order) |
 | 7 | Functions hide columns | `customers WHERE lower(email) = '…'`, then an expression index | Seq Scan → Index Scan |
 | 8 | Column order in a multi-column index | `WHERE last_name = …` vs. `WHERE first_name = …` | Index Scan vs. Seq Scan, or Postgres 18 skip scan |
-| 9 | Index Only Scan and the visibility map | `SELECT order_date FROM orders WHERE customer_id = 42`; update those rows; `VACUUM` | Index Only Scan with heap fetches 0 → >0 → 0 |
+| 9 | Index Only Scan and the visibility map | `SELECT order_date FROM orders WHERE customer_id = 42`; `UPDATE orders SET total = total WHERE customer_id = 42`; run it twice; `VACUUM orders`; run it again | Index Only Scan on `orders_customer_id_order_date_idx` (checked): heap fetches 0 → 6 (old and new versions' entries) → 3 (the old ones were marked dead) → 0 |
 | 10 | Top-N | `WHERE customer_id = 42 ORDER BY order_date DESC LIMIT 3` vs. `ORDER BY total DESC LIMIT 10` | Backward index scan with no sort vs. Sort |
 | 11 | Tiny tables | `categories WHERE id = 3` | Seq Scan despite the primary key |
 | 12 | Clustering factor | `orders WHERE id BETWEEN 1 AND 500` vs. `WHERE customer_id BETWEEN 1 AND 100` | Similar row counts; a handful of heap pages vs. hundreds |

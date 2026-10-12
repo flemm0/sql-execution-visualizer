@@ -139,12 +139,14 @@ function BuffersZone({ state, relations }: { state: PlaybackState; relations: Ma
         {slots.map((slot) => {
           const kind = relations.get(slot.page.relation)?.kind ?? 'table'
           const isCurrent = accessed !== null && samePage(slot.page, accessed.page)
-          const color = kind === 'index' ? 'border-index text-index' : 'border-heap text-heap'
+          // A table's visibility map is part of the table: amber, dashed.
+          const color =
+            kind === 'index' ? 'border-index text-index' : `border-heap text-heap ${slot.page.fork === 'vm' ? 'border-dashed' : ''}`
           // Keyed by position too, so the animation plays again on every access to the slot.
           const animation = isCurrent ? (accessed.type === 'buffer.read' ? 'slot-read' : 'slot-hit') : ''
           return (
             <li
-              key={`${slot.page.relation}/${slot.page.block}/${isCurrent ? state.position : ''}`}
+              key={`${slot.page.relation}/${slot.page.fork ?? 'main'}/${slot.page.block}/${isCurrent ? state.position : ''}`}
               className={`rounded border px-1 ${color} ${isCurrent ? 'bg-surface-2' : 'opacity-60'} ${animation}`}
               data-testid="viz-slot"
               data-current={isCurrent ? accessed.type : undefined}
@@ -176,6 +178,12 @@ function HeapZone({ state }: { state: PlaybackState }) {
         <div data-testid="viz-heap-page">
           <p>
             <span className="font-mono text-heap">heap page {integer.format(heap.page.block)}</span>
+            {heap.allVisible !== null && (
+              <span className="text-fg-muted" data-testid="viz-all-visible">
+                {' '}
+                · {heap.allVisible ? 'all-visible: not read, rows from the index' : 'not all-visible: rows fetched'}
+              </span>
+            )}
             {heap.visibleRows !== null && (
               <span className="text-fg-muted">
                 {' '}
@@ -215,8 +223,10 @@ function HeapRowItem({ row }: { row: HeapRow }) {
 
 /**
  * Every page of the table as a square, in order: the ones the query has been
- * through (amber), the ones that gave rows to the result (emerald), and the
- * one being read now (outlined). A big table gets several pages per square.
+ * through (amber), the ones that gave rows to the result (emerald), the ones
+ * an index-only scan didn't read because they're all-visible (sky, the
+ * index's color: their rows came from the index), and the one being read
+ * now (outlined). A big table gets several pages per square.
  */
 function MiniMap({ pages, marks, current }: { pages: number; marks: Map<number, PageMark>; current: number | null }) {
   const perCell = Math.max(1, Math.ceil(pages / MAX_MINIMAP_CELLS))
@@ -232,7 +242,7 @@ function MiniMap({ pages, marks, current }: { pages: number; marks: Map<number, 
       <div className="flex flex-wrap gap-px" role="img" aria-label="Pages of the table the query has read" data-testid="viz-minimap">
         {Array.from({ length: cells }, (_, cell) => {
           const mark = cellMarks[cell]
-          const fill = mark === 'result' ? 'bg-result' : mark === 'touched' ? 'bg-heap' : 'bg-surface-2'
+          const fill = mark === undefined ? 'bg-surface-2' : MARK_FILLS[mark]
           return (
             <span
               key={cell}
@@ -248,6 +258,12 @@ function MiniMap({ pages, marks, current }: { pages: number; marks: Map<number, 
   )
 }
 
+const MARK_FILLS: Record<PageMark, string> = {
+  touched: 'bg-heap',
+  result: 'bg-result',
+  fromIndex: 'bg-index',
+}
+
 /** The page the last step asked for or went through, if any. */
 function currentPage(state: PlaybackState): PageRef | null {
   const event = state.current
@@ -257,5 +273,5 @@ function currentPage(state: PlaybackState): PageRef | null {
 }
 
 function samePage(a: PageRef, b: PageRef | null) {
-  return b !== null && a.relation === b.relation && a.block === b.block
+  return b !== null && a.relation === b.relation && a.block === b.block && a.fork === b.fork
 }

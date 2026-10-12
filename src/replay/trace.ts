@@ -22,6 +22,12 @@ export interface TraceRelation {
 export interface PageRef {
   relation: number
   block: number
+  /**
+   * 'vm' for a page of a table's visibility map, which records which of its
+   * heap pages hold only rows every transaction can see. The map is a file of
+   * its own, numbered from 0 too. Absent for the table's or index's own pages.
+   */
+  fork?: 'vm'
 }
 
 /** A row version's place in a table: its page and line pointer number (Postgres's ctid). */
@@ -143,6 +149,29 @@ export interface HeapTupleEvent {
   matched: boolean
 }
 
+/**
+ * An index-only scan checks the visibility map for the heap page an index
+ * entry points into. If the page is all-visible (every row on it is visible
+ * to every transaction), the entry's own values are the row's, so the scan
+ * doesn't fetch the row from the heap. Otherwise a heap.tuple event follows:
+ * the scan fetches the row to check the query can see it.
+ */
+export interface VisibilityCheckEvent {
+  type: 'visibility.check'
+  node: number
+  /** The heap page the entry points into. */
+  page: PageRef
+  /** The row on it the entry points at. */
+  row: RowRef
+  allVisible: boolean
+  /**
+   * When the page is all-visible, whether the entry's values passed the
+   * filter (true when there is none); null when it isn't, since the
+   * heap.tuple event that follows says.
+   */
+  matched: boolean | null
+}
+
 /** A node passes a row on: to its parent node, or, from the top node, to the result. */
 export interface RowEmitEvent {
   type: 'row.emit'
@@ -163,6 +192,7 @@ export type TraceEvent =
   | IndexEntryEvent
   | IndexMarkDeadEvent
   | HeapTupleEvent
+  | VisibilityCheckEvent
   | RowEmitEvent
 
 /**

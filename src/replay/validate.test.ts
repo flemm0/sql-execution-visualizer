@@ -11,6 +11,8 @@ let db: PGlite
 let good: ValidationInput
 /** The same for an Index Scan with a Filter. */
 let goodIndexScan: ValidationInput
+/** The same for an Index Only Scan with a Filter. */
+let goodIndexOnlyScan: ValidationInput
 
 beforeAll(async () => {
   db = await createDatabase()
@@ -21,6 +23,13 @@ beforeAll(async () => {
     emptyCache: true,
   })
   goodIndexScan = asInput(indexScan)
+  const [indexOnlyScan] = await runStatementAt(
+    db,
+    `SELECT customer_id, order_date FROM orders WHERE customer_id BETWEEN 40 AND 45 AND extract(dow FROM order_date) <> 1`,
+    0,
+    { emptyCache: true },
+  )
+  goodIndexOnlyScan = asInput(indexOnlyScan)
 }, 120_000)
 afterAll(() => db.close())
 
@@ -106,6 +115,31 @@ describe('the validator', () => {
     expect(failedWith(failFirst, {}, goodIndexScan)).toEqual([
       'Index Scan using orders_pkey on orders: rows',
       'Index Scan using orders_pkey on orders: rows removed by filter',
+      'Result: rows',
+    ])
+  })
+
+  it('compares an Index Only Scan’s heap fetches, and counts entries rejected without a fetch as removed', () => {
+    expect(validate(goodIndexOnlyScan)).toMatchObject({ ok: true, notes: [] })
+    // A row on an all-visible page said to need a fetch.
+    const fetchFirst = (events: TraceEvent[]) =>
+      events.flatMap((event): TraceEvent[] =>
+        event.type === 'visibility.check' && event === events.find((each) => each.type === 'visibility.check')
+          ? [{ ...event, allVisible: false, matched: null }, { type: 'heap.tuple', node: event.node, row: event.row, visible: event.row, matched: true }]
+          : [event],
+      )
+    const title = 'Index Only Scan using orders_customer_id_order_date_idx on orders'
+    expect(failedWith(fetchFirst, {}, goodIndexOnlyScan)).toEqual([`${title}: heap fetches`])
+    // An entry that passed said to fail the filter: one more row removed, one fewer emitted.
+    const failFirst = (events: TraceEvent[]) => {
+      const first = events.findIndex((event) => event.type === 'visibility.check' && event.matched === true)
+      return events
+        .map((event, i) => (i === first ? { ...event, matched: false } : event))
+        .filter((event, i) => !(i === first + 1 && event.type === 'row.emit'))
+    }
+    expect(failedWith(failFirst, {}, goodIndexOnlyScan)).toEqual([
+      `${title}: rows`,
+      `${title}: rows removed by filter`,
       'Result: rows',
     ])
   })

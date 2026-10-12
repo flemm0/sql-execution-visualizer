@@ -11,7 +11,7 @@ describe('SharedBuffers', () => {
       {
         pages: [
           { relationOid: 10, fork: 'main', block: 2, bufferId: 1 },
-          // Only the main data counts: a visibility map page 5 isn't heap page 5.
+          // A visibility map page 5 isn't heap page 5.
           { relationOid: 10, fork: 'vm', block: 5, bufferId: 2 },
           { relationOid: 11, fork: 'main', block: 1, bufferId: 3 },
         ],
@@ -21,6 +21,9 @@ describe('SharedBuffers', () => {
     expect(buffers.access({ relation: 10, block: 2 })).toBe('buffer.hit')
     expect(buffers.access({ relation: 10, block: 5 })).toBe('buffer.read')
     expect(buffers.access({ relation: 10, block: 5 })).toBe('buffer.hit')
+    expect(buffers.access({ relation: 10, block: 5, fork: 'vm' })).toBe('buffer.hit')
+    expect(buffers.access({ relation: 10, block: 0, fork: 'vm' })).toBe('buffer.read')
+    expect(buffers.access({ relation: 10, block: 0 })).toBe('buffer.read')
     // Index and heap pages are numbered separately.
     expect(buffers.access({ relation: 11, block: 2 })).toBe('buffer.read')
     expect(buffers.access({ relation: 11, block: 1 })).toBe('buffer.hit')
