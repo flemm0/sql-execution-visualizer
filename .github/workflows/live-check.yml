@@ -1,0 +1,34 @@
+name: Live check
+
+# Runs the milestones' exit criteria (e2e/exit-criteria.spec.ts) against the
+# deployed site, after every deploy: ROADMAP.md counts a milestone as done
+# when its exit criteria hold on the live site.
+on:
+  workflow_run:
+    workflows: [Deploy to GitHub Pages]
+    types: [completed]
+  workflow_dispatch:
+  # When this workflow itself changes, check it works (against the site as deployed now).
+  pull_request:
+    paths: [.github/workflows/live-check.yml]
+
+jobs:
+  exit-criteria:
+    # After a deploy, only one that succeeded.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    env:
+      LIVE_URL: https://flemm0.github.io/sql-execution-visualizer/
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # After a deploy, the tests of the commit that was deployed.
+          ref: ${{ github.event.workflow_run.head_sha || '' }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Exit criteria on the live site
+        run: npx playwright test e2e/exit-criteria.spec.ts

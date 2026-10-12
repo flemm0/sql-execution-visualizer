@@ -1,6 +1,6 @@
 # Roadmap
 
-Each milestone ships as one or more PRs; merging to `main` deploys. A milestone is done when its exit criteria hold on the live site.
+Each milestone ships as one or more PRs; merging to `main` deploys. A milestone is done when its exit criteria hold on the live site: `e2e/exit-criteria.spec.ts` states them as tests, and the **Live check** workflow runs it against the live site after every deploy ([ADR 0034](decisions/0034-exit-criteria-on-the-live-site.md)).
 
 ## v1: single-table queries
 
@@ -21,6 +21,8 @@ Each milestone ships as one or more PRs; merging to `main` deploys. A milestone 
 **Exit:** a visitor can run any SQL, create and drop indexes, see the plan change, and reload without losing their changes.
 
 ### M2: replay engine and player
+**Status:** done (2026-10-12): the exit criteria pass on the live site.
+
 - Inspector, trace format, replay for **Seq Scan** and **Index Scan** (including Postgres 18 skip scan), validator.
 - Visualization pane (index / shared buffers / heap zones, captions, mini-map), player controls, empty-cache toggle, results building up live.
 - Page browser: a table's or index's pages, opened from the schema browser ([ADR 0032](decisions/0032-open-pages-from-the-schema-browser.md)).
