@@ -30,6 +30,8 @@ Each milestone ships as one or more PRs; merging to `main` deploys. A milestone 
 **Exit:** examples 1, 2, 4 and 11 animate end-to-end and validate in tests.
 
 ### M3: rest of v1
+**Status:** in progress: Index Only Scan replays (example 9).
+
 - Replay for Index Only Scan, Bitmap Index Scan + Bitmap Heap Scan, Sort, Limit.
 - Condensing with the ~30 s budget and expandable stretches; jump-to-next controls.
 - All 12 examples in the **Examples** menu; show-internals toggle; glossary tooltips; polish.

@@ -30,3 +30,29 @@ test.describe('M2: examples 1, 2, 4 and 11 animate end to end and validate', () 
     })
   }
 })
+
+/** M3's examples, as each one's replay lands; the criteria hold once all 12 are here (and within the ~30 s budget). */
+const M3_EXAMPLES = [
+  {
+    example: 9,
+    sql: 'SELECT order_date FROM orders WHERE customer_id = 42;',
+    node: 'Index Only Scan using orders_customer_id_order_date_idx on orders',
+    rows: '3 rows',
+  },
+]
+
+test.describe('M3: the examples animate end to end and validate', () => {
+  for (const { example, sql, node, rows } of M3_EXAMPLES) {
+    test(`example ${example}`, async ({ page }) => {
+      await openApp(page)
+      await runSql(page, sql)
+      await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres')
+      await expect(page.getByTestId('viz-mismatch')).toHaveCount(0)
+
+      await page.getByTestId('player').getByRole('button', { name: 'To the end', exact: true }).click()
+      await expect(page.getByTestId('viz-caption')).toHaveText(`${node} has no more rows: it sent ${rows} to the result.`)
+      await expect(page.getByTestId('rows-filling')).toHaveCount(0)
+      await expect(page.getByTestId('run-status')).toContainText(`SELECT: ${rows}`)
+    })
+  }
+})

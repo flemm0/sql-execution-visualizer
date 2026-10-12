@@ -1,4 +1,4 @@
-import { cachedBlocks, type CacheSnapshot, type Relation } from '../db/inspector'
+import type { CacheSnapshot, Relation } from '../db/inspector'
 import type { PageRef } from './trace'
 
 /**
@@ -9,12 +9,16 @@ import type { PageRef } from './trace'
  * evicted during a query (ADR 0022).
  */
 export class SharedBuffers {
-  /** Pages in buffers now, as "relation/block". */
+  /** Pages in buffers now, as "relation/fork/block". */
   private cached = new Set<string>()
 
   constructor(snapshot: CacheSnapshot, relations: Relation[]) {
-    for (const relation of relations) {
-      for (const block of cachedBlocks(snapshot, relation)) this.cached.add(key({ relation: relation.oid, block }))
+    const oids = new Set(relations.map((relation) => relation.oid))
+    for (const page of snapshot.pages) {
+      if (!oids.has(page.relationOid)) continue
+      // Replays read a relation's own pages and a table's visibility map.
+      if (page.fork === 'main') this.cached.add(key({ relation: page.relationOid, block: page.block }))
+      if (page.fork === 'vm') this.cached.add(key({ relation: page.relationOid, block: page.block, fork: 'vm' }))
     }
   }
 
@@ -27,5 +31,5 @@ export class SharedBuffers {
 }
 
 function key(page: PageRef) {
-  return `${page.relation}/${page.block}`
+  return `${page.relation}/${page.fork ?? 'main'}/${page.block}`
 }

@@ -121,7 +121,13 @@ describe('index scan nodes', () => {
     expect(backward).toMatchObject({ nodeType: 'Index Scan', indexCond: null, backward: true })
 
     const seqScan = (await planFor('SELECT * FROM categories')).root
-    expect(seqScan).toMatchObject({ indexName: null, indexCond: null, backward: false, indexSearches: null })
+    expect(seqScan).toMatchObject({ indexName: null, indexCond: null, backward: false, indexSearches: null, heapFetches: null })
+  })
+
+  it('carry an index-only scan’s heap fetches', async () => {
+    const scan = (await planFor('SELECT order_date FROM orders WHERE customer_id = 42')).root
+    expect(scan).toMatchObject({ nodeType: 'Index Only Scan', indexName: 'orders_customer_id_order_date_idx', heapFetches: 0 })
+    expect((await planFor('SELECT * FROM orders WHERE id = 4242')).root.heapFetches).toBeNull()
   })
 })
 

@@ -213,3 +213,40 @@ test('a query that can’t be animated says why, and a mismatch is flagged over 
   await expect(page.getByTestId('viz-mismatch')).toBeVisible()
   await expect(viz(page).getByTestId('player')).toBeVisible()
 })
+
+test('example 9: an index-only scan reads the visibility map, not the heap, until an update clears its bits', async ({ page }) => {
+  await openApp(page)
+  const example9 = 'SELECT order_date FROM orders WHERE customer_id = 42;'
+  await runSql(page, example9)
+  await control(page, 'To the end').click()
+  await expect(caption(page)).toHaveText(
+    'Index Only Scan using orders_customer_id_order_date_idx on orders has no more rows: it sent 3 rows to the result.',
+  )
+  await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres')
+  // Two index pages and the visibility map's one page: no heap page.
+  await expect(viz(page).getByTestId('viz-slot')).toHaveText([/^i\d+$/, /^i\d+$/, 'vm0'])
+  await expect(viz(page).getByTestId('viz-all-visible')).toHaveText('· all-visible: not read, rows from the index')
+  await expect(viz(page).locator('[data-testid="viz-minimap"] [data-mark="fromIndex"]')).toHaveCount(3)
+  await expect(viz(page).locator('[data-testid="viz-minimap"] [data-mark="result"]')).toHaveCount(0)
+
+  // Step back to the first entry's visibility check: its caption says why the heap isn't read.
+  await control(page, 'To the start').click()
+  for (let i = 0; i < 9; i++) await control(page, 'Step forward').click()
+  await expect(caption(page)).toContainText(/^The visibility map marks heap page \d+ all-visible/)
+
+  // An update clears the bits of the pages it touches: now the rows are fetched from the heap.
+  await runSql(page, 'UPDATE orders SET total = total WHERE customer_id = 42;')
+  await runSql(page, example9)
+  await control(page, 'To the end').click()
+  await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres')
+  await expect(viz(page).getByTestId('viz-all-visible')).toHaveText('· not all-visible: rows fetched')
+  await expect(viz(page).locator('[data-testid="viz-minimap"] [data-mark="fromIndex"]')).toHaveCount(0)
+  // The old versions' entries and the new ones': 6 rows fetched.
+  await expect(page.getByTestId('plan-pane')).toContainText(/Heap Fetches\s*6/)
+
+  // VACUUM sets them again.
+  await runSql(page, 'VACUUM orders;')
+  await runSql(page, example9)
+  await control(page, 'To the end').click()
+  await expect(viz(page).getByTestId('viz-all-visible')).toHaveText('· all-visible: not read, rows from the index')
+})

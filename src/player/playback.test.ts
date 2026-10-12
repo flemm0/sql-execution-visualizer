@@ -231,6 +231,62 @@ describe('the state at a step', () => {
       'No transaction can see the rows of 2 entries on index page 4 any more, so the scan marks them dead; later scans skip them.',
     )
   })
+  /** An index-only scan: one entry on an all-visible page, then one on a page that isn't, whose row is fetched. */
+  const indexOnly = trace([
+    { type: 'node.start', node: 0 },
+    { type: 'index.entry', node: 0, page: indexPage(57), offset: 7, key: ['42'], row: row(119, 59) },
+    { type: 'buffer.read', node: 0, page: { relation: TABLE, block: 0, fork: 'vm' } },
+    { type: 'visibility.check', node: 0, page: heapPage(119), row: row(119, 59), allVisible: true, matched: true },
+    { type: 'row.emit', node: 0, row: row(119, 59), resultIndex: 0 },
+    { type: 'index.entry', node: 0, page: indexPage(57), offset: 8, key: ['42'], row: row(588, 74) },
+    { type: 'visibility.check', node: 0, page: heapPage(588), row: row(588, 74), allVisible: false, matched: null },
+    { type: 'buffer.read', node: 0, page: heapPage(588) },
+    { type: 'heap.tuple', node: 0, row: row(588, 74), visible: row(588, 74), matched: true },
+    { type: 'row.emit', node: 0, row: row(588, 74), resultIndex: 1 },
+    { type: 'node.finish', node: 0 },
+  ])
+  const indexOnlyNodes = nodes({ title: 'Index Only Scan using orders_customer_id_order_date_idx on orders' })
+
+  it('an index-only scan: reads the visibility map, and skips the heap for an all-visible page', () => {
+    const caption = (position: number) => stateAt(indexOnly, indexOnlyNodes, position).caption
+    expect(caption(3)).toBe('Visibility map page 0 isn’t in shared buffers, so it’s read from disk into a buffer.')
+    expect(caption(4)).toBe(
+      'The visibility map marks heap page 119 all-visible (every row on it is visible to every transaction), so the entry’s values are enough: row (119,59) isn’t fetched from the heap.',
+    )
+    expect(caption(7)).toBe(
+      'The visibility map doesn’t mark heap page 588 all-visible, so the scan fetches row (588,74) from the heap to check this query can see it.',
+    )
+
+    // The map's page 0 is a slot of its own, not heap page 0, and doesn't make the heap zone show a page.
+    const afterMap = stateAt(indexOnly, indexOnlyNodes, 3)
+    expect(afterMap.buffers.map((slot) => slot.page)).toEqual([{ relation: TABLE, block: 0, fork: 'vm' }])
+    expect(afterMap.heap).toBeNull()
+    expect(afterMap.pageMarks.size).toBe(0)
+
+    const skipped = stateAt(indexOnly, indexOnlyNodes, 5)
+    expect(skipped.heap).toMatchObject({ page: heapPage(119), allVisible: true, rows: [{ outcome: 'emitted', resultIndex: 0 }] })
+    expect(skipped.pageMarks.get(119)).toBe('fromIndex')
+
+    const end = stateAt(indexOnly, indexOnlyNodes, indexOnly.events.length)
+    expect(end.heap).toMatchObject({ page: heapPage(588), allVisible: false, rows: [{ outcome: 'emitted', resultIndex: 1 }] })
+    // A page the scan didn't read keeps its own mark, though rows from it went to the result.
+    expect([...end.pageMarks]).toEqual([
+      [119, 'fromIndex'],
+      [588, 'result'],
+    ])
+    expect(end.resultRows).toBe(2)
+  })
+
+  it('an index-only scan: an all-visible page’s entry that fails the filter is rejected without a fetch', () => {
+    const rejected = trace([
+      { type: 'visibility.check', node: 0, page: heapPage(119), row: row(119, 59), allVisible: true, matched: false },
+    ])
+    const state = stateAt(rejected, nodes({ hasFilter: true }), 1)
+    expect(state.heap?.rows).toEqual([{ row: row(119, 59), visible: null, outcome: 'rejected', resultIndex: null }])
+    expect(state.caption).toBe(
+      'The visibility map marks heap page 119 all-visible (every row on it is visible to every transaction), so the entry’s values are enough: row (119,59) isn’t fetched from the heap. Its values fail the filter, so it’s rejected.',
+    )
+  })
 })
 
 describe('the rows sent to the result by a step', () => {

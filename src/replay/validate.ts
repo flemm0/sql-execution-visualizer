@@ -4,7 +4,8 @@ import type { Trace } from './trace'
 /*
  * The validator checks a replay against what Postgres reported: each node's
  * row count, rows removed by its filter, searches down an index (Postgres
- * 18's "Index Searches"), and buffer hits and reads from
+ * 18's "Index Searches"), rows an index-only scan fetched from the heap
+ * ("Heap Fetches"), and buffer hits and reads from
  * EXPLAIN ANALYZE, and the rows sent to the result against the real result.
  * The animation plays either way; a failed check is shown as a warning.
  */
@@ -68,12 +69,18 @@ export function validate(input: ValidationInput): Validation {
       for (const event of own) {
         if (event.type === 'heap.page') removed += event.visibleRows - event.matchedRows
         if (event.type === 'heap.tuple' && event.visible !== null && !event.matched) removed++
+        // An index-only scan checks the filter on an all-visible page's entries without fetching their rows.
+        if (event.type === 'visibility.check' && event.matched === false) removed++
       }
       checks.push(check(`${node.title}: rows removed by filter`, Math.round(node.rowsRemovedByFilter * node.loops), removed))
     }
     if (node.indexSearches !== null) {
       const searches = own.filter((event) => event.type === 'index.search').length
       checks.push(check(`${node.title}: index searches`, node.indexSearches, searches))
+    }
+    if (node.heapFetches !== null) {
+      const fetches = own.filter((event) => event.type === 'heap.tuple').length
+      checks.push(check(`${node.title}: heap fetches`, Math.round(node.heapFetches * node.loops), fetches))
     }
     checks.push(check(`${node.title}: buffer hits`, node.sharedHit, buffers.filter((e) => e.type === 'buffer.hit').length))
     checks.push(check(`${node.title}: buffer reads`, node.sharedRead, buffers.filter((e) => e.type === 'buffer.read').length))

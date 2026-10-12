@@ -9,6 +9,7 @@ import {
   type IndexColumn,
   type Relation,
   type Tid,
+  type VisibilityMap,
 } from '../db/inspector'
 import type { PlanNode } from '../db/plan'
 import { query } from '../db/query'
@@ -33,6 +34,11 @@ import { Unsupported } from './unsupported'
  *
  * Step 1 runs before the query does (walkIndexScan), step 2 after
  * (replayIndexScan).
+ *
+ * An Index Only Scan walks its index the same way, but before fetching a row
+ * it checks the table's visibility map: if the row's heap page is
+ * all-visible, the entry's own values are enough, and the heap page isn't
+ * read.
  *
  * What's supported: conditions =, <, <=, >, >= (one value each) and = ANY
  * (a list) on the index's key columns, at most one of each kind per column,
@@ -81,9 +87,11 @@ export async function walkIndexScan(db: PGliteInterface, node: PlanNode, index: 
 }
 
 /**
- * The trace of an Index Scan at the top of the plan, from its walk of the
- * index, after the query has run: fetches the rows the walk found entries
- * for, and finds the entries the scan marked dead.
+ * The trace of an Index Scan or Index Only Scan at the top of the plan, from
+ * its walk of the index, after the query has run: fetches the rows the walk
+ * found entries for, and finds the entries the scan marked dead.
+ * `visibilityMap` is the table's map as an Index Only Scan found it, and null
+ * for an Index Scan.
  */
 export async function replayIndexScan(
   db: PGliteInterface,
@@ -91,12 +99,21 @@ export async function replayIndexScan(
   table: Relation,
   index: Relation,
   walk: IndexWalk,
+  visibilityMap: VisibilityMap | null,
   buffers: SharedBuffers,
 ): Promise<TraceEvent[]> {
-  const tids = walk.steps.flatMap((step) => (step.kind === 'entry' ? [step.tid] : []))
+  // An Index Only Scan doesn't fetch rows on all-visible pages, but their
+  // values are read by ctid to check the result, and the version it can see
+  // may not be the one its entry points at (a HOT update before VACUUM).
+  const tids = entryTids(walk)
   const rows = await fetchRows(db, node, table, tids)
   const dead = await markedDead(db, index, walk.steps)
-  return [...indexScanEvents(node, table, index, walk.steps, rows, dead, buffers)]
+  return [...indexScanEvents(node, table, index, walk.steps, rows, dead, visibilityMap, buffers)]
+}
+
+/** The heap rows a walk's matching entries point at, in index order. */
+export function entryTids(walk: IndexWalk): Tid[] {
+  return walk.steps.flatMap((step) => (step.kind === 'entry' ? [step.tid] : []))
 }
 
 /**
@@ -323,13 +340,21 @@ function hotChain(page: HeapPage, offset: number): number[] {
  * The trace: each index page the scan reads (a hit or a read), each matching
  * entry, and for each, the heap row it fetches and what it finds. A heap page
  * is a buffer access only when the scan moves to it from another page: while
- * consecutive entries point into the same page, the scan keeps it pinned.
+ * consecutive fetches are from the same page, the scan keeps it pinned.
  *
  * When the scan leaves a leaf page (for the next one, a new search from the
- * root, or the end) after finding rows nobody can see, it reads the page
- * again to mark their entries dead (_bt_killitems): Postgres 18 lets go of a
- * leaf page once it has its matches, so marking them takes another buffer
- * access.
+ * root, or the end) after finding rows nobody can see, it marks their entries
+ * dead (_bt_killitems). An Index Scan has let go of the leaf page by then
+ * (Postgres 18 does once it has the page's matches), so marking them takes
+ * another buffer access. An Index Only Scan keeps the page pinned, so it
+ * doesn't.
+ *
+ * An Index Only Scan (`visibilityMap` not null) checks the visibility map
+ * for each entry's heap page first (VM_ALL_VISIBLE in nodeIndexonlyscan.c),
+ * and fetches the row only when the page isn't all-visible. It keeps the map
+ * page it last read pinned, so reading the map costs one buffer access for
+ * the first entry (each map page covers tens of thousands of heap pages). A
+ * table with no map yet costs none, and no page of it is all-visible.
  */
 export function* indexScanEvents(
   node: PlanNode,
@@ -338,10 +363,13 @@ export function* indexScanEvents(
   steps: IndexStep[],
   rows: Map<string, FetchedRow>,
   dead: Map<number, Set<number>>,
+  visibilityMap: VisibilityMap | null,
   buffers: SharedBuffers,
 ): Generator<TraceEvent> {
   yield { type: 'node.start', node: node.id }
   let pinned: number | null = null
+  /** The visibility map page the scan has pinned. */
+  let pinnedMapPage: number | null = null
   /** The leaf page the scan is on, and the entries it returned from it. */
   let leaf: { block: number; returned: number[] } | null = null
   let resultIndex = 0
@@ -349,7 +377,7 @@ export function* indexScanEvents(
     const marked = leaf === null ? [] : unique(leaf.returned.filter((offset) => dead.get(leaf?.block as number)?.has(offset)))
     if (leaf !== null && marked.length > 0) {
       const page = { relation: index.oid, block: leaf.block }
-      yield { type: buffers.access(page), node: node.id, page }
+      if (visibilityMap === null) yield { type: buffers.access(page), node: node.id, page }
       yield { type: 'index.markDead', node: node.id, page, offsets: marked }
     }
     leaf = null
@@ -372,13 +400,28 @@ export function* indexScanEvents(
       const row = { relation: table.oid, ...step.tid }
       const page = { relation: index.oid, block: step.block }
       yield { type: 'index.entry', node: node.id, page, offset: step.offset, key: step.key, row }
+      const fetched = rows.get(tidText(step.tid)) as FetchedRow
+      const visible = fetched.visible === null ? null : { relation: table.oid, ...fetched.visible }
+      if (visibilityMap !== null) {
+        const heapPage = { relation: table.oid, block: step.tid.block }
+        const mapPage = Math.floor(step.tid.block / visibilityMap.heapPagesPerMapPage)
+        if (mapPage < visibilityMap.pages && mapPage !== pinnedMapPage) {
+          pinnedMapPage = mapPage
+          const page = { relation: table.oid, block: mapPage, fork: 'vm' as const }
+          yield { type: buffers.access(page), node: node.id, page }
+        }
+        if (visibilityMap.allVisible.has(step.tid.block)) {
+          yield { type: 'visibility.check', node: node.id, page: heapPage, row, allVisible: true, matched: fetched.matched }
+          if (fetched.matched) yield { type: 'row.emit', node: node.id, row: visible ?? row, resultIndex: resultIndex++ }
+          continue
+        }
+        yield { type: 'visibility.check', node: node.id, page: heapPage, row, allVisible: false, matched: null }
+      }
       if (step.tid.block !== pinned) {
         pinned = step.tid.block
         const heapPage = { relation: table.oid, block: step.tid.block }
         yield { type: buffers.access(heapPage), node: node.id, page: heapPage }
       }
-      const fetched = rows.get(tidText(step.tid)) as FetchedRow
-      const visible = fetched.visible === null ? null : { relation: table.oid, ...fetched.visible }
       yield { type: 'heap.tuple', node: node.id, row, visible, matched: fetched.matched }
       if (visible !== null && fetched.matched) {
         yield { type: 'row.emit', node: node.id, row: visible, resultIndex: resultIndex++ }

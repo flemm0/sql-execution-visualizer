@@ -64,6 +64,8 @@ export interface PlanNode {
   backward: boolean
   /** How many times an index scan searched down its index from the root (Postgres 18+); null for other nodes. */
   indexSearches: number | null
+  /** How many rows an index-only scan fetched from the heap, because the visibility map didn't say their page was all-visible; null for other nodes. */
+  heapFetches: number | null
   /** The values the node outputs, as expressions over its table, e.g. ["order_id", "(quantity * 2)"] (VERBOSE). */
   output: string[]
   children: PlanNode[]
@@ -181,6 +183,7 @@ function parseNode(node: JsonPlanNode, newId: () => number): PlanNode {
   const indexName = node['Index Name']
   const indexCond = node['Index Cond']
   const indexSearches = node['Index Searches']
+  const heapFetches = node['Heap Fetches']
   return {
     id,
     title: nodeTitle(node),
@@ -202,6 +205,7 @@ function parseNode(node: JsonPlanNode, newId: () => number): PlanNode {
     indexCond: typeof indexCond === 'string' ? indexCond : null,
     backward: node['Scan Direction'] === 'Backward',
     indexSearches: typeof indexSearches === 'number' ? indexSearches : null,
+    heapFetches: typeof heapFetches === 'number' ? heapFetches : null,
     output: Array.isArray(node['Output']) ? (node['Output'] as string[]) : [],
     children: (node.Plans ?? []).map((child) => parseNode(child, newId)),
   }

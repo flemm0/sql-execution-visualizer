@@ -90,14 +90,24 @@ export interface HeapView {
   /** For a scan that goes through the whole page: rows visible to the query, and rows that passed the filter. */
   visibleRows: number | null
   matchedRows: number | null
+  /**
+   * For an index-only scan, what the visibility map says about the page:
+   * all-visible (its rows come from the index alone, and the page isn't
+   * read) or not (rows are fetched from it); null for other scans.
+   */
+  allVisible: boolean | null
   /** Rows on it the scan has dealt with, the latest last (at most SHOWN_ROWS). */
   rows: HeapRow[]
   /** How many rows on it the scan has dealt with. */
   rowCount: number
 }
 
-/** Each heap page's part in the query so far, for the mini-map. */
-export type PageMark = 'touched' | 'result'
+/**
+ * Each heap page's part in the query so far, for the mini-map: read
+ * ('touched'), read and gave rows to the result ('result'), or all-visible,
+ * so an index-only scan didn't read it ('fromIndex').
+ */
+export type PageMark = 'touched' | 'result' | 'fromIndex'
 
 export interface PlaybackState {
   /** How many events have happened. */
@@ -243,12 +253,12 @@ function apply(state: PlaybackState, event: TraceEvent, relations: Map<number, T
       const hit = event.type === 'buffer.hit'
       if (hit) state.hits++
       else state.reads++
-      const key = `${event.page.relation}/${event.page.block}`
+      const key = `${event.page.relation}/${event.page.fork ?? 'main'}/${event.page.block}`
       if (!slots.has(key)) {
         slots.add(key)
         state.buffers.push({ page: event.page, wasCached: hit })
       }
-      if (relations.get(event.page.relation)?.kind === 'table') {
+      if (relations.get(event.page.relation)?.kind === 'table' && event.page.fork === undefined) {
         enterHeapPage(state, event.page)
         state.pageMarks.set(event.page.block, state.pageMarks.get(event.page.block) ?? 'touched')
       }
@@ -317,6 +327,19 @@ function apply(state: PlaybackState, event: TraceEvent, relations: Map<number, T
       break
     }
 
+    case 'visibility.check': {
+      const heap = enterHeapPage(state, event.page)
+      heap.allVisible = event.allVisible
+      if (event.allVisible) {
+        state.pageMarks.set(event.page.block, 'fromIndex')
+        if (event.matched === false) {
+          heap.rowCount++
+          heap.rows = latest(heap.rows, { row: event.row, visible: null, outcome: 'rejected', resultIndex: null })
+        }
+      }
+      break
+    }
+
     case 'row.emit': {
       const heap = state.heap
       if (heap !== null && heap.page.block === event.row.block && heap.page.relation === event.row.relation) {
@@ -332,7 +355,8 @@ function apply(state: PlaybackState, event: TraceEvent, relations: Map<number, T
       }
       if (event.resultIndex !== null) {
         state.resultRows++
-        state.pageMarks.set(event.row.block, 'result')
+        // A page the scan didn't read keeps its mark.
+        if (state.pageMarks.get(event.row.block) !== 'fromIndex') state.pageMarks.set(event.row.block, 'result')
       }
       break
     }
@@ -434,6 +458,17 @@ function describe(
       return `${seen}, but it fails the filter, so it’s rejected.`
     }
 
+    case 'visibility.check': {
+      const page = pageName(event.page, relations)
+      const row = rowName(event.row)
+      if (!event.allVisible) {
+        return `The visibility map doesn’t mark ${page} all-visible, so the scan fetches row ${row} from the heap to check this query can see it.`
+      }
+      const skip = `The visibility map marks ${page} all-visible (every row on it is visible to every transaction), so the entry’s values are enough: row ${row} isn’t fetched from the heap`
+      if (!node?.hasFilter) return `${skip}.`
+      return event.matched ? `${skip}, and they pass the filter.` : `${skip}. Its values fail the filter, so it’s rejected.`
+    }
+
     case 'row.emit':
       if (event.resultIndex === null) return `Row ${rowName(event.row)} goes up to the next plan node.`
       return `Row ${rowName(event.row)} goes to the result as row ${integer.format(event.resultIndex + 1)}.`
@@ -443,7 +478,7 @@ function describe(
 /** Makes `page` the heap zone's page, starting a fresh view when it's another page. */
 function enterHeapPage(state: PlaybackState, page: PageRef): HeapView {
   if (state.heap && state.heap.page.relation === page.relation && state.heap.page.block === page.block) return state.heap
-  state.heap = { page, visibleRows: null, matchedRows: null, rows: [], rowCount: 0 }
+  state.heap = { page, visibleRows: null, matchedRows: null, allVisible: null, rows: [], rowCount: 0 }
   return state.heap
 }
 
@@ -452,15 +487,20 @@ function latest<T>(items: T[], item: T): T[] {
   return [...items, item].slice(-SHOWN_ROWS)
 }
 
-/** "heap page 212" or "index page 57": table and index pages are numbered separately (docs/UX.md). */
+/**
+ * "heap page 212", "index page 57" or "visibility map page 0": table and
+ * index pages, and a table's visibility map, are numbered separately (docs/UX.md).
+ */
 export function pageName(page: PageRef, relations: Map<number, TraceRelation>): string {
+  if (page.fork === 'vm') return `visibility map page ${integer.format(page.block)}`
   const relation = relations.get(page.relation)
   if (relation?.kind === 'index') return `index page ${integer.format(page.block)}`
   return `heap page ${integer.format(page.block)}`
 }
 
-/** A buffer slot's short label: "i57" for an index page, "h212" for a heap page. */
+/** A buffer slot's short label: "i57" for an index page, "h212" for a heap page, "vm0" for a visibility map page. */
 export function shortPageName(page: PageRef, relations: Map<number, TraceRelation>): string {
+  if (page.fork === 'vm') return `vm${page.block}`
   return `${relations.get(page.relation)?.kind === 'index' ? 'i' : 'h'}${page.block}`
 }
 
