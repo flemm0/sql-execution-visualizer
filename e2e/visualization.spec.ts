@@ -230,7 +230,10 @@ test('example 9: an index-only scan reads the visibility map, not the heap, unti
   await expect(viz(page).locator('[data-testid="viz-minimap"] [data-mark="result"]')).toHaveCount(0)
 
   // Step back to the first entry's visibility check: its caption says why the heap isn't read.
+  // The animation had finished, so going back to the start leaves it paused there.
   await control(page, 'To the start').click()
+  await expect(control(page, 'Play')).toBeVisible()
+  await expect(step(page)).toHaveText(/^step 0 \//)
   for (let i = 0; i < 9; i++) await control(page, 'Step forward').click()
   await expect(caption(page)).toContainText(/^The visibility map marks heap page \d+ all-visible/)
 

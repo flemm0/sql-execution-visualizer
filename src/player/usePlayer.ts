@@ -90,6 +90,9 @@ export function usePlayer(): Player {
       setWantsToPlay(false)
     },
     seek(to) {
+      // Playing on only if it was: at the last step playback has stopped, so
+      // going back from there (to the start, or with the timeline) stays paused.
+      if (!playing) setWantsToPlay(false)
       setPosition(clamp(to))
     },
     stepForward() {
