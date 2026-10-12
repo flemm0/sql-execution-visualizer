@@ -181,6 +181,28 @@ test('with a warm cache the pages are hits; the speed is remembered', async ({ p
   await expect(page.getByLabel('Speed')).toHaveValue('instant')
 })
 
+test('with autoplay off, a run waits paused at step 0, and the choice is remembered', async ({ page }) => {
+  await openApp(page)
+  await runSql(page, 'SELECT * FROM orders WHERE id = 4242;')
+  await expect(control(page, 'Pause').or(control(page, 'Play'))).toBeVisible()
+  await page.getByRole('checkbox', { name: 'Autoplay' }).uncheck()
+
+  await page.reload()
+  await openApp(page)
+  // Even at instant speed, which would otherwise jump straight to the end.
+  await runSql(page, 'SELECT * FROM orders WHERE id = 4242;')
+  await page.getByLabel('Speed').selectOption('instant')
+  await runSql(page, 'SELECT * FROM orders WHERE id BETWEEN 1000 AND 2000;')
+  await expect(page.getByRole('checkbox', { name: 'Autoplay' })).not.toBeChecked()
+  await expect(step(page)).toHaveText(/^step 0 \/ /)
+  await expect(control(page, 'Play')).toBeVisible()
+  await expect(page.getByTestId('rows-filling')).toContainText('0 of 1,001 so far')
+
+  await control(page, 'Play').click()
+  await expect(page.getByTestId('rows-filling')).toHaveCount(0)
+  await expect(caption(page)).toContainText('has no more rows')
+})
+
 test('a query that can’t be animated says why, and a mismatch is flagged over the animation', async ({ page }) => {
   await openApp(page)
   await runSql(page, 'SELECT count(*) FROM categories;')

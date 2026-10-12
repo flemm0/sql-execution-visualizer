@@ -4,8 +4,8 @@ const integer = new Intl.NumberFormat('en-US')
 
 /**
  * The player's controls (docs/UX.md#playback): to the start, step back,
- * play/pause, step forward, to the end, a timeline scrubber, the speed, and
- * which step is showing.
+ * play/pause, step forward, to the end, a timeline scrubber, the speed,
+ * autoplay, and which step is showing.
  */
 export function PlayerControls({ player }: { player: Player }) {
   const { position, steps, playing } = player
@@ -54,6 +54,13 @@ export function PlayerControls({ player }: { player: Player }) {
             </option>
           ))}
         </select>
+      </label>
+      <label
+        className="flex items-center gap-1.5 text-fg-muted"
+        title="Start each query's animation playing as soon as it runs. Turn off to have it wait, paused at step 0."
+      >
+        <input type="checkbox" checked={player.autoplay} onChange={(event) => player.setAutoplay(event.target.checked)} />
+        Autoplay
       </label>
       <span className="font-mono text-fg-muted tabular-nums" data-testid="viz-step">
         step {integer.format(position)} / {integer.format(steps)}

@@ -1,14 +1,16 @@
 import { useEffect, useState } from 'react'
 import { readSetting, saveSetting } from '../storage'
+import { startOfTrace, type Speed } from './playback'
 
-/** Steps per second, or 'instant' to jump straight to the end. */
-export type Speed = number | 'instant'
+export type { Speed }
 
 export const SPEEDS: Speed[] = [1, 3, 10, 30, 60, 'instant']
 export const DEFAULT_SPEED: Speed = 30
 
 /** Where the chosen speed is kept between visits (localStorage). */
 const SPEED_KEY = 'player-speed'
+/** Remembers whether autoplay is turned off ('off'); on unless turned off. */
+const AUTOPLAY_KEY = 'player-autoplay'
 
 function readSpeed(): Speed {
   const saved = readSetting(SPEED_KEY)
@@ -23,7 +25,9 @@ export interface Player {
   steps: number
   playing: boolean
   speed: Speed
-  /** Starts a new trace of `steps` steps from step 0, playing (autoplay); at instant speed, at its end. */
+  /** Whether a new trace starts playing by itself (remembered in this browser). */
+  autoplay: boolean
+  /** Starts a new trace of `steps` steps where startOfTrace says: playing from step 0 with autoplay on, paused there with it off. */
   load: (steps: number) => void
   play: () => void
   pause: () => void
@@ -32,17 +36,19 @@ export interface Player {
   stepForward: () => void
   stepBack: () => void
   setSpeed: (speed: Speed) => void
+  setAutoplay: (autoplay: boolean) => void
 }
 
 /**
- * Playback of a trace: the position, play and pause, and the speed
- * (remembered in this browser). App owns the one player, so the
+ * Playback of a trace: the position, play and pause, the speed and autoplay
+ * (both remembered in this browser). App owns the one player, so the
  * visualization and the results pane show the same step, and loads each
- * run's trace into it, which starts playing at once (autoplay,
- * docs/UX.md#running-statements).
+ * run's trace into it, which starts playing at once unless autoplay is off
+ * (docs/UX.md#running-statements).
  */
 export function usePlayer(): Player {
   const [speed, setSpeedState] = useState<Speed>(readSpeed)
+  const [autoplay, setAutoplayState] = useState(() => readSetting(AUTOPLAY_KEY) !== 'off')
   const [steps, setSteps] = useState(0)
   const [position, setPosition] = useState(0)
   const [wantsToPlay, setWantsToPlay] = useState(true)
@@ -67,10 +73,12 @@ export function usePlayer(): Player {
     steps,
     playing,
     speed,
+    autoplay,
     load(newSteps) {
+      const start = startOfTrace(newSteps, speed, autoplay)
       setSteps(newSteps)
-      setPosition(speed === 'instant' ? newSteps : 0)
-      setWantsToPlay(true)
+      setPosition(start.position)
+      setWantsToPlay(start.playing)
     },
     play() {
       // At the end, play starts over; at instant speed, it goes straight to the end.
@@ -96,6 +104,11 @@ export function usePlayer(): Player {
       setSpeedState(next)
       saveSetting(SPEED_KEY, String(next))
       if (next === 'instant' && playing) setPosition(steps)
+    },
+    setAutoplay(next) {
+      // Applies from the next run; what's loaded now keeps playing or stays paused.
+      setAutoplayState(next)
+      saveSetting(AUTOPLAY_KEY, next ? 'on' : 'off')
     },
   }
 }
