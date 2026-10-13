@@ -1,5 +1,5 @@
 import { acceptCompletion } from '@codemirror/autocomplete'
-import { indentWithTab } from '@codemirror/commands'
+import { indentWithTab, isolateHistory } from '@codemirror/commands'
 import { PostgreSQL, sql, type SQLNamespace } from '@codemirror/lang-sql'
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { Compartment, EditorSelection, Prec } from '@codemirror/state'
@@ -78,6 +78,8 @@ export function SqlEditor({ initialText, database, onRun, onChange, viewRef }: S
         language.current.of(sqlLanguage(null)),
         syntaxHighlighting(highlightStyle),
         editorTheme,
+        // Long lines wrap to the pane's width instead of scrolling sideways: the pane is often narrow.
+        EditorView.lineWrapping,
         EditorView.contentAttributes.of({ 'aria-label': 'SQL editor' }),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) callbacks.current.onChange(update.state.doc.toString())
@@ -103,6 +105,21 @@ export function SqlEditor({ initialText, database, onRun, onChange, viewRef }: S
 /** Moves the editor's cursor to an offset and selects up to `to`, scrolling it into view. */
 export function selectInEditor(view: EditorView, from: number, to = from) {
   view.dispatch({ selection: EditorSelection.single(from, to), scrollIntoView: true })
+  view.focus()
+}
+
+/**
+ * Replaces all of the editor's text, puts the cursor at `cursor` and focuses
+ * the editor. The change is one step of the editor's undo history, kept apart
+ * from typing before and after it, so Cmd/Ctrl+Z brings the old text back.
+ */
+export function replaceEditorText(view: EditorView, text: string, cursor: number) {
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: text },
+    selection: EditorSelection.cursor(cursor),
+    annotations: isolateHistory.of('full'),
+    scrollIntoView: true,
+  })
   view.focus()
 }
 

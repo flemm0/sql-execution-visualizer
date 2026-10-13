@@ -8,7 +8,9 @@ import { loadCatalog, postgresVersion, type DatabaseInfo } from './db/catalog'
 import { connectToDatabase } from './db/client'
 import { inTransaction, runAll, runStatementAt, type RowsResult, type StatementResult } from './db/runner'
 import { SEED_VERSION, readSeedInfo, resetDatabase, type SeedInfo } from './db/seed'
-import { SqlEditor, selectInEditor, type RunMode } from './editor/SqlEditor'
+import { ExamplesMenu } from './editor/ExamplesMenu'
+import { SqlEditor, replaceEditorText, selectInEditor, type RunMode } from './editor/SqlEditor'
+import { EXAMPLES, exampleEditorText, type Example } from './examples'
 import { Term } from './glossary/Term'
 import { APP_NAME, Header } from './layout/Header'
 import { Workspace } from './layout/Workspace'
@@ -199,6 +201,14 @@ export default function App() {
     if (editorView.current) selectInEditor(editorView.current, position)
   }
 
+  /** Puts an example into the editor, replacing its text (undoable), ready for Run; nothing runs yet (ADR 0041). */
+  function loadExample(example: Example) {
+    const view = editorView.current
+    if (view === null) return
+    const { text, cursor } = exampleEditorText(example)
+    replaceEditorText(view, text, cursor)
+  }
+
   async function reset() {
     if (!window.confirm('Reset the database? Your indexes, tables and data changes will be lost.')) return
     setState({ status: 'resetting' })
@@ -280,6 +290,7 @@ export default function App() {
               >
                 Run all
               </button>
+              <ExamplesMenu examples={EXAMPLES} onChoose={loadExample} />
               <button type="button" className="btn text-xs" onClick={reset} disabled={state.status !== 'ready'}>
                 Reset database
               </button>
