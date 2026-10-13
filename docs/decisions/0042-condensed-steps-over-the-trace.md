@@ -1,4 +1,4 @@
-# 0041: Condensed steps over the unchanged trace, to a fixed budget of 900 steps
+# 0042: Condensed steps over the unchanged trace, to a fixed budget of 900 steps
 
 - **Status:** Accepted; supersedes the first bullet of [0027](0027-player-steps-and-state.md) (one step is one trace event)
 - **Date:** 2026-10-13

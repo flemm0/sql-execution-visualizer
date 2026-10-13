@@ -134,7 +134,7 @@ export default function App() {
       const results = mode === 'all' ? await runAll(db, sql, options) : await runStatementAt(db, sql, cursor, options)
       setRun({ status: 'done', results, sql, id: nextRunId.current++ })
       const replay = lastQueryOf(results)?.replay
-      // Long traces play in condensed steps, to fit the ~30 s budget (ADR 0041).
+      // Long traces play in condensed steps, to fit the ~30 s budget (ADR 0042).
       player.load(replay?.status === 'replayed' ? condense(replay.trace) : [])
       // A query to animate takes the visualization pane back; otherwise an open page stays, and is read again.
       if (replay?.status === 'replayed') setPageTarget(null)

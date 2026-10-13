@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 import { openApp, runSql } from './editor'
 
 /*
- * Condensing (docs/UX.md#playback, ADR 0041): a long trace plays in about 30
+ * Condensing (docs/UX.md#playback, ADR 0042): a long trace plays in about 30
  * seconds, with repetitive stretches as one step each, which a visitor can
  * expand, step through and collapse again. The result follows the player
  * throughout.

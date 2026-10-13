@@ -8,7 +8,7 @@ import { STEP_BUDGET, condense, isStretch, summarize, type Step } from './conden
 
 /*
  * Every example plays within the ~30 s budget at the default speed (ADR 0005,
- * ADR 0041), condensed from the real trace, and so do much bigger plans of
+ * ADR 0042), condensed from the real trace, and so do much bigger plans of
  * other shapes. One database for all of them: the examples that add an index
  * come last, in the order the Examples menu runs them.
  */

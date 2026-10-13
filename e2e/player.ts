@@ -2,7 +2,7 @@ import { expect, type Page } from '@playwright/test'
 
 /*
  * Moving the player to an event of the trace. Long traces play condensed
- * (ADR 0041), so step n isn't event n: the player says how many events have
+ * (ADR 0042), so step n isn't event n: the player says how many events have
  * happened (data-events-done), and a stretch can be expanded to reach an
  * event inside it.
  */

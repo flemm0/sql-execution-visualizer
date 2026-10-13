@@ -2,7 +2,7 @@ import type { PageRef, Trace, TraceEvent } from '../replay/trace'
 import { pageName, type NodeInfo } from './playback'
 
 /*
- * Condensing: the player's steps over a trace (docs/UX.md#playback, ADR 0041).
+ * Condensing: the player's steps over a trace (docs/UX.md#playback, ADR 0042).
  *
  * The trace stays as the replay made it, one event per action. The player
  * plays a list of steps over it: each step is a range of consecutive events.
