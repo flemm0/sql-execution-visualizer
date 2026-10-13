@@ -9,6 +9,7 @@ interface WorkspaceProps {
   editorToolbar: ReactNode
   plan: ReactNode
   visualization: ReactNode
+  visualizationToolbar: ReactNode
   results: ReactNode
 }
 
@@ -55,7 +56,14 @@ export function Workspace(props: WorkspaceProps) {
             </Group>
           </Panel>
           <ResizeHandle between="rows" />
-          <Pane id="visualization-pane" title="Visualization" collapseToward="up" defaultSize="40" minSize={120}>
+          <Pane
+            id="visualization-pane"
+            title="Visualization"
+            collapseToward="up"
+            defaultSize="40"
+            minSize={120}
+            toolbar={props.visualizationToolbar}
+          >
             {props.visualization}
           </Pane>
           <ResizeHandle between="rows" />

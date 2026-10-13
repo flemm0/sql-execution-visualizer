@@ -81,6 +81,8 @@ export interface HeapItem {
   redirectTo: number | null
   /** The tuple's length in bytes. */
   length: number
+  /** Where the tuple starts on the page, in bytes from the page's start (lp_off); null for a line pointer with no tuple. */
+  tupleStart: number | null
   /** The transaction that created this version of the row. */
   xmin: number | null
   /** The transaction that deleted or updated it; 0 if none did. */
@@ -90,6 +92,25 @@ export interface HeapItem {
   /** Status bits, e.g. whether xmin is known to have committed (see htup_details.h). */
   infomask: number | null
   infomask2: number | null
+  /**
+   * The infomask bits' names, as Postgres's heap_tuple_infomask_flags writes
+   * them (e.g. HEAP_XMIN_COMMITTED): each bit set in infomask or infomask2,
+   * and the names for combinations of them (e.g. HEAP_XMIN_FROZEN). Empty
+   * when there's no tuple.
+   */
+  infomaskFlags: string[]
+  combinedFlags: string[]
+}
+
+/** A heap page's header, as page_header shows it. */
+export interface HeapPageHeader {
+  block: number
+  /** Where the page's free space starts (pd_lower): the line pointer array ends there. */
+  lower: number
+  /** Where the free space ends (pd_upper): the tuples start there. */
+  upper: number
+  /** How many line pointers the page has, from pd_lower (PageGetMaxOffsetNumber in bufpage.h). */
+  linePointers: number
 }
 
 /** The B-tree metapage (always page 0): where the tree starts. */
@@ -339,41 +360,108 @@ export async function readIndexColumns(db: PGliteInterface, index: Relation): Pr
 /** Reads heap pages of a table with heap_page_items, in the order asked (a page asked for twice is read once). */
 export async function readHeapPages(db: PGliteInterface, table: Relation, blocks: number[]): Promise<HeapPage[]> {
   if (blocks.length === 0) return []
-  const result = await query<{
-    block: number
-    lp: number
-    lp_flags: number
-    lp_off: number
-    lp_len: number
-    t_xmin: string | null
-    t_xmax: string | null
-    t_ctid: string | null
-    t_infomask: number | null
-    t_infomask2: number | null
-  }>(db, `
-    SELECT p.block::int AS block, h.lp, h.lp_flags, h.lp_off, h.lp_len,
-      h.t_xmin::text, h.t_xmax::text, h.t_ctid::text, h.t_infomask, h.t_infomask2
+  const result = await query<HeapItemRow>(db, `
+    SELECT p.block::int AS block, ${HEAP_ITEM_COLUMNS}
     FROM unnest(${intArray(unique(blocks))}) AS p(block),
       heap_page_items(get_raw_page(${relationName(table)}, p.block)) AS h
+      ${INFOMASK_FLAGS}
     ORDER BY p.block, h.lp
   `)
   const pages = new Map<number, HeapPage>(blocks.map((block) => [block, { block, items: [] }]))
-  for (const row of result.rows) {
-    const state = LINE_POINTER_STATES[row.lp_flags]
-    pages.get(row.block)?.items.push({
-      offset: row.lp,
-      state,
-      // For a redirect, lp_off holds the line pointer it redirects to.
-      redirectTo: state === 'redirect' ? row.lp_off : null,
-      length: row.lp_len,
-      xmin: row.t_xmin === null ? null : Number(row.t_xmin),
-      xmax: row.t_xmax === null ? null : Number(row.t_xmax),
-      ctid: row.t_ctid === null ? null : parseTid(row.t_ctid),
-      infomask: row.t_infomask,
-      infomask2: row.t_infomask2,
-    })
-  }
+  for (const row of result.rows) pages.get(row.block)?.items.push(heapItem(row))
   return blocks.map((block) => pages.get(block) as HeapPage)
+}
+
+/**
+ * Reads only these line pointers of a table, and their tuples, with
+ * heap_page_items: each by its page and line pointer number, in page and
+ * line pointer order, with its page number. Postgres reads each page whole
+ * either way; sending back only the items asked for keeps it quick.
+ */
+export async function readHeapItems(db: PGliteInterface, table: Relation, tids: Tid[]): Promise<(HeapItem & { block: number })[]> {
+  if (tids.length === 0) return []
+  const result = await query<HeapItemRow>(db, `
+    WITH wanted AS (
+      SELECT * FROM unnest(${intArray(tids.map((tid) => tid.block))}, ${intArray(tids.map((tid) => tid.offset))}) AS w(block, lp)
+    )
+    SELECT p.block::int AS block, ${HEAP_ITEM_COLUMNS}
+    FROM (SELECT DISTINCT block FROM wanted) AS p
+      CROSS JOIN LATERAL heap_page_items(get_raw_page(${relationName(table)}, p.block)) AS h
+      JOIN wanted AS w ON w.block = p.block AND w.lp = h.lp
+      ${INFOMASK_FLAGS}
+    ORDER BY p.block, h.lp
+  `)
+  return result.rows.map((row) => ({ block: row.block, ...heapItem(row) }))
+}
+
+/** Reads heap pages' headers with page_header, in the order asked (a page asked for twice is read once). */
+export async function readHeapPageHeaders(db: PGliteInterface, table: Relation, blocks: number[]): Promise<HeapPageHeader[]> {
+  if (blocks.length === 0) return []
+  const result = await query<{ block: number; lower: number; upper: number }>(db, `
+    SELECT p.block::int AS block, h.lower, h.upper
+    FROM unnest(${intArray(unique(blocks))}) AS p(block), page_header(get_raw_page(${relationName(table)}, p.block)) AS h
+  `)
+  const headers = new Map(
+    result.rows.map((row) => [
+      row.block,
+      {
+        block: row.block,
+        lower: row.lower,
+        upper: row.upper,
+        // The line pointers fill the space from the end of the header to pd_lower, 4 bytes each.
+        linePointers: Math.max(0, (row.lower - PAGE_HEADER_BYTES) / LINE_POINTER_BYTES),
+      },
+    ]),
+  )
+  return blocks.map((block) => headers.get(block) as HeapPageHeader)
+}
+
+/** A page header's size (SizeOfPageHeaderData), and a line pointer's (sizeof(ItemIdData)), in bufpage.h and itemid.h. */
+const PAGE_HEADER_BYTES = 24
+const LINE_POINTER_BYTES = 4
+
+/** What readHeapPages and readHeapItems ask heap_page_items for. */
+interface HeapItemRow {
+  block: number
+  lp: number
+  lp_flags: number
+  lp_off: number
+  lp_len: number
+  t_xmin: string | null
+  t_xmax: string | null
+  t_ctid: string | null
+  t_infomask: number | null
+  t_infomask2: number | null
+  raw_flags: string[] | null
+  combined_flags: string[] | null
+}
+
+const HEAP_ITEM_COLUMNS = `h.lp, h.lp_flags, h.lp_off, h.lp_len,
+      h.t_xmin::text, h.t_xmax::text, h.t_ctid::text, h.t_infomask, h.t_infomask2,
+      -- As json, since query() decodes json but not arrays.
+      to_json(f.raw_flags) AS raw_flags, to_json(f.combined_flags) AS combined_flags`
+
+/** Has Postgres name each tuple's infomask bits (pageinspect's heap_tuple_infomask_flags); no names for a line pointer with no tuple. */
+const INFOMASK_FLAGS = `LEFT JOIN LATERAL heap_tuple_infomask_flags(h.t_infomask, h.t_infomask2) AS f
+        ON h.t_infomask IS NOT NULL`
+
+function heapItem(row: HeapItemRow): HeapItem {
+  const state = LINE_POINTER_STATES[row.lp_flags]
+  return {
+    offset: row.lp,
+    state,
+    // For a redirect, lp_off holds the line pointer it redirects to.
+    redirectTo: state === 'redirect' ? row.lp_off : null,
+    length: row.lp_len,
+    tupleStart: state === 'redirect' || row.lp_len === 0 ? null : row.lp_off,
+    xmin: row.t_xmin === null ? null : Number(row.t_xmin),
+    xmax: row.t_xmax === null ? null : Number(row.t_xmax),
+    ctid: row.t_ctid === null ? null : parseTid(row.t_ctid),
+    infomask: row.t_infomask,
+    infomask2: row.t_infomask2,
+    infomaskFlags: row.raw_flags ?? [],
+    combinedFlags: row.combined_flags ?? [],
+  }
 }
 
 const LINE_POINTER_STATES: HeapItem['state'][] = ['unused', 'normal', 'redirect', 'dead']
@@ -391,13 +479,15 @@ export interface VisibilityMap {
   heapPagesPerMapPage: number
   /** The heap pages asked about that are all-visible. */
   allVisible: Set<number>
+  /** The heap pages asked about that are all-frozen: every row on them is frozen, so VACUUM can skip them. */
+  allFrozen: Set<number>
 }
 
 /**
  * Reads the visibility map's bits for these heap pages of a table, decoded
  * from its raw pages (visibilitymap.c): after the page header, two bits per
- * heap page, the lower one "all-visible". A heap page past the end of the
- * map isn't all-visible.
+ * heap page, the lower one "all-visible", the higher one "all-frozen". A heap
+ * page past the end of the map is neither.
  */
 export async function readVisibilityMap(db: PGliteInterface, table: Relation, blocks: number[]): Promise<VisibilityMap> {
   const size = await query<{ pages: number; block_size: number }>(db, `
@@ -408,21 +498,28 @@ export async function readVisibilityMap(db: PGliteInterface, table: Relation, bl
   const heapPagesPerMapPage = (blockSize - VM_HEADER_BYTES) * 4
   const inMap = unique(blocks).filter((block) => Math.floor(block / heapPagesPerMapPage) < pages)
   const allVisible = new Set<number>()
-  if (inMap.length === 0) return { pages, heapPagesPerMapPage, allVisible }
-  const result = await query<{ block: number; all_visible: boolean }>(db, `
+  const allFrozen = new Set<number>()
+  if (inMap.length === 0) return { pages, heapPagesPerMapPage, allVisible, allFrozen }
+  const result = await query<{ block: number; bits: number }>(db, `
     SELECT p.block::int AS block,
       get_byte(
         get_raw_page(${relationName(table)}, 'vm', p.block / ${heapPagesPerMapPage}),
         (${VM_HEADER_BYTES} + (p.block % ${heapPagesPerMapPage}) / 4)::int
-      ) >> (2 * (p.block % 4)::int) & 1 = 1 AS all_visible
+      ) >> (2 * (p.block % 4)::int) & 3 AS bits
     FROM unnest(${intArray(inMap)}) AS p(block)
   `)
-  for (const row of result.rows) if (row.all_visible) allVisible.add(row.block)
-  return { pages, heapPagesPerMapPage, allVisible }
+  for (const row of result.rows) {
+    if ((row.bits & VM_ALL_VISIBLE) !== 0) allVisible.add(row.block)
+    if ((row.bits & VM_ALL_FROZEN) !== 0) allFrozen.add(row.block)
+  }
+  return { pages, heapPagesPerMapPage, allVisible, allFrozen }
 }
 
 /** A visibility map page's header, before its bits: the standard page header, rounded up to 8 bytes. */
 const VM_HEADER_BYTES = 24
+/** A heap page's two bits in the map (visibilitymap.h). */
+const VM_ALL_VISIBLE = 1
+const VM_ALL_FROZEN = 2
 
 /** Reads a B-tree index's metapage with bt_metap. */
 export async function readBtreeMeta(db: PGliteInterface, index: Relation): Promise<BtreeMeta> {

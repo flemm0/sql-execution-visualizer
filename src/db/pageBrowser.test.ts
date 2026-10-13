@@ -67,6 +67,59 @@ describe('readTablePage', () => {
     ])
   })
 
+  it('carries each line pointer’s tuple header, the page header and the map bits, as pageinspect reads them', async () => {
+    const view = await readTablePage(db, orders, 3)
+    const real = await db.query<{
+      lp: number
+      lp_off: number
+      lp_len: number
+      t_xmin: string
+      t_xmax: string
+      t_infomask: number
+      t_infomask2: number
+      raw_flags: string[]
+    }>(
+      `SELECT h.lp, h.lp_off, h.lp_len, h.t_xmin::text, h.t_xmax::text, h.t_infomask, h.t_infomask2, f.raw_flags
+       FROM heap_page_items(get_raw_page('orders', 3)) AS h, heap_tuple_infomask_flags(h.t_infomask, h.t_infomask2) AS f
+       ORDER BY h.lp`,
+    )
+    expect(
+      view.items.map((item) => [
+        item.offset,
+        item.tupleStart,
+        item.length,
+        item.header?.xmin,
+        item.header?.xmax,
+        item.header?.infomask,
+        item.header?.infomask2,
+        item.header?.flags,
+      ]),
+    ).toEqual(
+      real.rows.map((row) => [row.lp, row.lp_off, row.lp_len, Number(row.t_xmin), Number(row.t_xmax), row.t_infomask, row.t_infomask2, row.raw_flags]),
+    )
+    expect(view.items[0].header?.ctid).toEqual({ block: 3, offset: 1 })
+    const header = await db.query<{ lower: number; upper: number }>(`SELECT lower, upper FROM page_header(get_raw_page('orders', 3))`)
+    expect(view.header).toEqual(header.rows[0])
+    // The seed is vacuumed (and frozen: VACUUM freezes rows it can, PGlite having so few transactions).
+    const frozen = await db.query<{ all_frozen: boolean }>(
+      `SELECT bool_and(f.raw_flags @> ARRAY['HEAP_XMIN_COMMITTED', 'HEAP_XMIN_INVALID']) AS all_frozen
+       FROM heap_page_items(get_raw_page('orders', 3)) AS h, heap_tuple_infomask_flags(h.t_infomask, h.t_infomask2) AS f`,
+    )
+    expect(view.visibility).toEqual({ allVisible: true, allFrozen: frozen.rows[0].all_frozen })
+  })
+
+  it('shows the old version an UPDATE replaced: its xmax, and its t_ctid pointing at the new version', async () => {
+    const view = await readTablePage(db, versions, 0)
+    const [old, , , replacement] = view.items
+    expect(old.header?.xmax).toBe(0)
+    const replaced = view.items[1]
+    expect(replaced.header?.xmax).toBe(replacement.header?.xmin)
+    expect(replaced.header?.ctid).toEqual({ block: 0, offset: 4 })
+    expect(replacement.header?.flags).toContain('HEAP_UPDATED')
+    // Never vacuumed, so the table has no visibility map yet.
+    expect(view.visibility).toBeNull()
+  })
+
   it('shows the last page when asked for one past the end, and nothing for a table with no pages', async () => {
     const [table] = await findRelations(db, [orders])
     expect((await readTablePage(db, orders, table.pages + 10)).block).toBe(table.pages - 1)
@@ -112,6 +165,20 @@ describe('readIndexPage', () => {
   })
 
   // PGlite's databases sort text by byte (the C collation), so capitals come first.
+  it('shows a page’s high key, printed by Postgres: the first key of the page to its right; none on the rightmost page', async () => {
+    const root = await readIndexPage(db, orders, 'orders_pkey', null)
+    expect(root.page.next).toBeNull()
+    expect(root.highKey).toBeNull()
+    const leaf = await leftmostLeaf(orders, 'orders_pkey')
+    expect(leaf.page.next).not.toBeNull()
+    const right = await readIndexPage(db, orders, 'orders_pkey', leaf.page.next)
+    expect(leaf.highKey?.key).toEqual(right.items[0].key)
+    // Every key on the page sorts at or below it.
+    expect(Number(leaf.items.at(-1)?.key?.[0])).toBeLessThan(Number(leaf.highKey?.key?.[0]))
+    const bytes = await db.query<{ data: string }>(`SELECT data FROM bt_page_items('orders_pkey', ${leaf.page.block}) WHERE itemoffset = 1`)
+    expect(leaf.highKey?.keyBytes).toBe(bytes.rows[0].data)
+  })
+
   it('prints text keys, and shows the bytes of keys it can’t read yet', async () => {
     const text = await readIndexPage(db, words, 'words_word_idx', null)
     expect(text.items.map((item) => item.key)).toEqual([["Bob's"], ['apple'], ['fig'], ['pear']])

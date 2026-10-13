@@ -287,4 +287,21 @@ describe('laying out the B-tree', () => {
       expect(ghost.x + ghost.width).toBeLessThanOrEqual(522)
     }
   })
+
+  it('with Show internals, ends each page drawn in full with its high key, +∞ on the rightmost, and keeps it in the width', () => {
+    const off = layoutBtree(input({ view: walked, pages, currentEntry: 4 }))
+    expect(off.pages.flatMap((shape) => shape.cells).some((cell) => cell.kind === 'highKey')).toBe(false)
+
+    const on = layoutBtree(input({ view: walked, pages, currentEntry: 4, highKeys: true }))
+    const [top, child] = on.pages
+    expect(top.cells.at(-1)).toMatchObject({ kind: 'highKey', text: 'HK +∞' })
+    expect(child.cells.at(-1)).toMatchObject({ kind: 'highKey', text: 'HK 4540', offset: 1 })
+    expect(child.cells.filter((cell) => cell.kind === 'highKey')).toHaveLength(1)
+    // The high key sits right after the page's last cell, and the page still fits the zone.
+    const last = child.cells[child.cells.length - 2]
+    expect(child.cells.at(-1)?.x).toBeCloseTo(last.x + last.width)
+    for (const shape of on.pages) expect(shape.x + shape.width).toBeLessThanOrEqual(520)
+    // The followed pointer is the same one.
+    expect(top.cells.find((cell) => cell.mark === 'followed')?.offset).toBe(13)
+  })
 })

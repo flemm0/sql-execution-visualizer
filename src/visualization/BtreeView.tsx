@@ -170,7 +170,16 @@ function CellShape({ cell, divider }: { cell: Cell; divider: boolean }) {
       {mark && mark.opacity > 0 && (
         <rect x={cell.x + 1} y={1} width={cell.width - 2} height={NODE_HEIGHT - 2} rx={3} fill={mark.fill} fillOpacity={mark.opacity} />
       )}
-      {divider && <line x1={cell.x} y1={0} x2={cell.x} y2={NODE_HEIGHT} stroke="var(--border)" />}
+      {divider && (
+        <line
+          x1={cell.x}
+          y1={0}
+          x2={cell.x}
+          y2={NODE_HEIGHT}
+          stroke={cell.kind === 'highKey' ? 'var(--border-strong)' : 'var(--border)'}
+          strokeDasharray={cell.kind === 'highKey' ? '2 2' : undefined}
+        />
+      )}
       {cell.kind === 'gap' ? (
         // A pointer starts here: a dot at the bottom of the gap.
         <circle
@@ -185,7 +194,7 @@ function CellShape({ cell, divider }: { cell: Cell; divider: boolean }) {
           y={NODE_HEIGHT / 2}
           textAnchor="middle"
           dominantBaseline="central"
-          fill={mark?.text ?? (cell.kind === 'ellipsis' ? 'var(--text-secondary)' : 'var(--text-primary)')}
+          fill={mark?.text ?? (cell.kind === 'key' ? 'var(--text-primary)' : 'var(--text-secondary)')}
           textDecoration={struck ? 'line-through' : undefined}
         >
           {cell.text}

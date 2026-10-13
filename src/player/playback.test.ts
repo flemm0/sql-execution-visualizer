@@ -10,7 +10,7 @@ const relations: Trace['relations'] = [
 ]
 
 function trace(events: TraceEvent[]): Trace {
-  return { relations, events, indexPages: [], sorts: [], limits: [] }
+  return { relations, events, indexPages: [], sorts: [], limits: [], heapPages: [] }
 }
 
 function nodes(info: Partial<NodeInfo> = {}) {

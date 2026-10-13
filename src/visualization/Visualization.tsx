@@ -15,9 +15,10 @@ import {
   type SortView,
 } from '../player/playback'
 import type { Player } from '../player/usePlayer'
-import type { PageRef, Trace, TraceRelation } from '../replay/trace'
+import { MAX_TRACED_ROWS, type HeapPageContents, type PageRef, type RowRef, type Trace, type TraceRelation } from '../replay/trace'
 import { allNodes, type Validation } from '../replay/validate'
 import { BtreeView } from './BtreeView'
+import { LinePointerText, PageHeaderText, VisibilityText } from './Internals'
 import { PlayerControls } from './PlayerControls'
 
 const integer = new Intl.NumberFormat('en-US')
@@ -33,6 +34,8 @@ interface VisualizationProps {
   validation: Validation
   /** App's player, with this trace loaded: the results pane follows the same step. */
   player: Player
+  /** Show internals: line pointers, tuple headers, visibility map bits and high keys. */
+  internals: boolean
 }
 
 /**
@@ -40,7 +43,7 @@ interface VisualizationProps {
  * step by step through three zones, index → shared buffers → heap, with a
  * caption for each step and the player's controls.
  */
-export function Visualization({ plan, trace, validation, player }: VisualizationProps) {
+export function Visualization({ plan, trace, validation, player, internals }: VisualizationProps) {
   const planNodes = useMemo(() => new Map(allNodes(plan.root).map((node) => [node.id, node])), [plan])
   const nodeInfo = useMemo(() => {
     const info = new Map<number, NodeInfo>()
@@ -69,9 +72,9 @@ export function Visualization({ plan, trace, validation, player }: Visualization
         </p>
       )}
       <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto px-3">
-        {state.index && <IndexZone view={state.index} state={state} trace={trace} />}
+        {state.index && <IndexZone view={state.index} state={state} trace={trace} internals={internals} />}
         <BuffersZone state={state} relations={relations} />
-        <HeapZone state={state} />
+        <HeapZone state={state} trace={trace} internals={internals} />
         {state.sort && <SortZone sort={state.sort} />}
       </div>
       <p className="border-t border-line px-3 py-2 text-sm" aria-live="polite" data-testid="viz-caption">
@@ -140,7 +143,7 @@ function Zone({ title, testId, wide = false, children }: { title: string; testId
 }
 
 /** The current search down the index, drawn as the B-tree pages it went through, with the entries that matched. */
-function IndexZone({ view, state, trace }: { view: IndexView; state: PlaybackState; trace: Trace }) {
+function IndexZone({ view, state, trace, internals }: { view: IndexView; state: PlaybackState; trace: Trace; internals: boolean }) {
   const pages = useMemo(
     () => new Map(trace.indexPages.filter((page) => page.relation === view.index.id).map((page) => [page.block, page])),
     [trace, view.index.id],
@@ -158,7 +161,14 @@ function IndexZone({ view, state, trace }: { view: IndexView; state: PlaybackSta
         {view.leaf && ` · ${integer.format(view.entryCount)} matched on idx p${view.leaf.block}`}
         {view.markedDead > 0 && ` · ${integer.format(view.markedDead)} marked dead`}
       </p>
-      <BtreeView view={view} pages={pages} keyColumns={keyColumns} current={currentPage(state)} currentEntry={currentEntry} />
+      <BtreeView
+        view={view}
+        pages={pages}
+        keyColumns={keyColumns}
+        current={currentPage(state)}
+        currentEntry={currentEntry}
+        highKeys={internals}
+      />
     </Zone>
   )
 }
@@ -214,10 +224,12 @@ function BuffersZone({ state, relations }: { state: PlaybackState; relations: Ma
 }
 
 /** The table: a mini-map of its pages, and the page being read now in detail. */
-function HeapZone({ state }: { state: PlaybackState }) {
+function HeapZone({ state, trace, internals }: { state: PlaybackState; trace: Trace; internals: boolean }) {
+  const contents = useMemo(() => new Map(trace.heapPages.map((page) => [`${page.relation}/${page.block}`, page])), [trace])
   const table = state.table
   if (table === null) return null
   const heap = state.heap
+  const page = heap ? (contents.get(`${heap.page.relation}/${heap.page.block}`) ?? null) : null
   return (
     <Zone title={`Heap ${table.name} (${integer.format(table.pages)} ${table.pages === 1 ? 'page' : 'pages'})`} testId="viz-heap">
       {state.bitmap && <BitmapLine bitmap={state.bitmap} />}
@@ -247,10 +259,11 @@ function HeapZone({ state }: { state: PlaybackState }) {
               </span>
             )}
           </p>
+          {internals && <HeapPageInternals page={page} />}
           <ul className="font-mono" aria-label="Rows on this page">
             {heap.rowCount > heap.rows.length && <li className="text-fg-muted">…</li>}
             {heap.rows.map((row, i) => (
-              <HeapRowItem key={i} row={row} />
+              <HeapRowItem key={i} row={row} internals={internals} page={page} />
             ))}
           </ul>
         </div>
@@ -322,7 +335,12 @@ const OUTCOMES: Record<HeapRow['outcome'], { mark: string; text: string; color: 
   invisible: { mark: '·', text: 'not visible', color: 'text-fg-muted' },
 }
 
-function HeapRowItem({ row }: { row: HeapRow }) {
+/**
+ * A row on the current page and what became of it; with Show internals,
+ * its line pointer and tuple header from `page` (null if the trace has none
+ * for the page).
+ */
+function HeapRowItem({ row, internals, page }: { row: HeapRow; internals: boolean; page: HeapPageContents | null }) {
   const outcome = OUTCOMES[row.outcome]
   return (
     <li className={outcome.color} data-testid="viz-heap-row" data-outcome={row.outcome}>
@@ -330,7 +348,56 @@ function HeapRowItem({ row }: { row: HeapRow }) {
       {row.visible && ` → ${rowName(row.visible)}`} {outcome.text}
       {row.to !== null && ` ${row.to}`}
       {row.resultIndex !== null && ` row ${integer.format(row.resultIndex + 1)}`}
+      {internals && (
+        <div className="pl-3 text-[11px]">
+          <RowInternals page={page} row={row.row} />
+          {row.visible && <RowInternals page={page} row={row.visible} />}
+        </div>
+      )}
     </li>
+  )
+}
+
+/** A row's line pointer and tuple header, or why the trace has none for it. */
+function RowInternals({ page, row }: { page: HeapPageContents | null; row: RowRef }) {
+  const lp = page?.linePointers.find((each) => each.offset === row.offset)
+  if (lp) {
+    return (
+      <div>
+        <LinePointerText lp={lp} />
+      </div>
+    )
+  }
+  let why = 'internals weren’t captured for this page'
+  if (page && page.header === null) why = 'the page wasn’t read, so its line pointers aren’t shown'
+  else if (page && !page.complete) {
+    why = `line pointer not captured: a trace keeps them for the first ${integer.format(MAX_TRACED_ROWS)} rows it names only`
+  }
+  return (
+    <div className="text-fg-muted italic" data-testid="internals-missing">
+      lp {row.offset}: {why}
+    </div>
+  )
+}
+
+/** The current page's header and visibility map bits, under Show internals. */
+function HeapPageInternals({ page }: { page: HeapPageContents | null }) {
+  return (
+    <p className="font-mono text-[11px] text-fg-muted" data-testid="viz-heap-internals">
+      {page === null ? (
+        'Internals weren’t captured for this page.'
+      ) : (
+        <>
+          {page.header ? (
+            <PageHeaderText lower={page.header.lower} upper={page.header.upper} linePointers={page.header.linePointers} />
+          ) : (
+            'not read by this query: no page header'
+          )}
+          <br />
+          <VisibilityText bits={page.visibility} />
+        </>
+      )}
+    </p>
   )
 }
 
