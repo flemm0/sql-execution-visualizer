@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { readSetting, saveSetting } from '../storage'
+import { collapseStretch, eventsDone, expandStretch, isStretch, type Step } from './condense'
 import { startOfTrace, type Speed } from './playback'
 
 export type { Speed }
@@ -22,13 +23,20 @@ function readSpeed(): Speed {
 export interface Player {
   /** How many steps have happened, from 0 to `steps`. */
   position: number
+  /** How many steps there are to play: the condensed steps, plus the events of any stretch expanded. */
   steps: number
+  /** How many trace events have happened after `position` steps: what stateAt and the panes are given. */
+  events: number
+  /** How many events the trace has: more than `steps` when stretches condense them. */
+  totalEvents: number
+  /** The step that happened last; null at the start. */
+  current: Step | null
   playing: boolean
   speed: Speed
   /** Whether a new trace starts playing by itself (remembered in this browser). */
   autoplay: boolean
-  /** Starts a new trace of `steps` steps where startOfTrace says: playing from step 0 with autoplay on, paused there with it off. */
-  load: (steps: number) => void
+  /** Starts a new trace's steps (see condense) where startOfTrace says: playing from step 0 with autoplay on, paused there with it off. */
+  load: (steps: Step[]) => void
   play: () => void
   pause: () => void
   /** Moves to a step (clamped to the trace), playing on if it was playing. */
@@ -37,6 +45,10 @@ export interface Player {
   stepBack: () => void
   setSpeed: (speed: Speed) => void
   setAutoplay: (autoplay: boolean) => void
+  /** Expands the stretch just played into one step per event, and pauses on its first event. */
+  expand: () => void
+  /** Collapses the expanded stretch the current step is in back into one step, and pauses on it. */
+  collapse: () => void
 }
 
 /**
@@ -49,8 +61,10 @@ export interface Player {
 export function usePlayer(): Player {
   const [speed, setSpeedState] = useState<Speed>(readSpeed)
   const [autoplay, setAutoplayState] = useState(() => readSetting(AUTOPLAY_KEY) !== 'off')
-  const [steps, setSteps] = useState(0)
+  const [list, setList] = useState<Step[]>([])
   const [position, setPosition] = useState(0)
+  const steps = list.length
+  const current = position > 0 ? (list[position - 1] ?? null) : null
   const [wantsToPlay, setWantsToPlay] = useState(true)
   // Playing stops by itself at the last step.
   const playing = wantsToPlay && position < steps
@@ -71,12 +85,15 @@ export function usePlayer(): Player {
   return {
     position,
     steps,
+    events: eventsDone(list, position),
+    totalEvents: list.at(-1)?.end ?? 0,
+    current,
     playing,
     speed,
     autoplay,
     load(newSteps) {
-      const start = startOfTrace(newSteps, speed, autoplay)
-      setSteps(newSteps)
+      const start = startOfTrace(newSteps.length, speed, autoplay)
+      setList(newSteps)
       setPosition(start.position)
       setWantsToPlay(start.playing)
     },
@@ -112,6 +129,19 @@ export function usePlayer(): Player {
       // Applies from the next run; what's loaded now keeps playing or stays paused.
       setAutoplayState(next)
       saveSetting(AUTOPLAY_KEY, next ? 'on' : 'off')
+    },
+    expand() {
+      if (current === null || !isStretch(current)) return
+      // The stretch's first event takes its place, so the step count stays where it was.
+      setWantsToPlay(false)
+      setList(expandStretch(list, position - 1))
+    },
+    collapse() {
+      if (current?.stretch === undefined) return
+      const collapsed = collapseStretch(list, position - 1)
+      setWantsToPlay(false)
+      setList(collapsed.steps)
+      setPosition(collapsed.index + 1)
     },
   }
 }

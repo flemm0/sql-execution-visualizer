@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { openApp, runSql } from './editor'
+import { seekToEvent } from './player'
 
 function viz(page: Page) {
   return page.getByTestId('visualization')
@@ -89,9 +90,9 @@ test('example 2 runs through every page of order_items, step by step or straight
   await expect(viz(page).getByTestId('viz-index')).toHaveCount(0)
   await expect(viz(page).getByTestId('viz-minimap')).toBeVisible()
   await expect(viz(page).getByTestId('viz-minimap').locator('[data-mark]')).not.toHaveCount(0)
-  // The step before the end: the last page, which has none of the rows.
+  // The step before the end: a stretch of the last pages, which have none of the rows.
   await control(page, 'Step back').click()
-  await expect(caption(page)).toHaveText(/^Heap page 1,277: \d+ rows visible to the query/)
+  await expect(caption(page)).toHaveText(/^Heap pages? ([\d,]+ to )?1,277: [\d,]+ rows visible to the query, checked against the filter; none pass\./)
   await expect(planNode.getByTestId('plan-rows')).toHaveText(/^rows 189 so far of 189 · est\. \d+$/)
   await expect(planNode.getByTestId('plan-status')).toHaveText('◀ active')
 })
@@ -263,8 +264,8 @@ test('example 6: a bitmap scan marks every matching row first, then reads each o
   await control(page, 'Pause').click()
   const minimap = (mark: string) => viz(page).locator(`[data-testid="viz-minimap"] [data-mark="${mark}"]`)
 
-  // Both nodes start, the search reads 4 index pages (an access and a visit each), then 944 entries match: step 955.
-  await page.getByRole('slider', { name: 'Timeline' }).fill('955')
+  // Both nodes start, the search reads 4 index pages (an access and a visit each), then 944 entries match: event 955.
+  await seekToEvent(page, 955)
   await expect(caption(page)).toContainText(/^Entry .+ matches; the scan marks its row, \(\d+,\d+\), in the bitmap instead of fetching it/)
   await expect(viz(page).getByTestId('viz-node')).toContainText('Bitmap Index Scan on orders_customer_id_order_date_idx')
   await expect(viz(page).getByTestId('viz-rows')).toHaveText(/^rows: 944 so far/)
@@ -368,7 +369,7 @@ test('a top-N heapsort keeps the best 10 of 50,000 orders as the Seq Scan passes
   await runSql(page, 'SELECT * FROM orders ORDER BY total DESC LIMIT 10;')
   await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres', { timeout: 30_000 })
   await control(page, 'Pause').click()
-  await page.getByRole('slider', { name: 'Timeline' }).fill('30001')
+  await seekToEvent(page, 30001)
   const sort = viz(page).getByTestId('viz-sort')
   await expect(sort.getByTestId('viz-sort-summary')).toHaveText('top-N heapsort: keeps the best 10 · 14,833 seen · 14,823 dropped')
   // The best 5 kept, then the worst: the one a new row has to beat.

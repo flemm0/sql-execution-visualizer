@@ -1,5 +1,15 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import { openApp, runSql } from './editor'
+
+/** The ~30 s budget at the default 30 steps a second (ADR 0005): the most steps an animation may have. */
+const STEP_BUDGET = 900
+
+/** Checks the animation the page loaded plays within the budget: its condensed step count, as the player exposes it. */
+async function expectWithinBudget(page: Page) {
+  const steps = Number(await page.getByTestId('player').getAttribute('data-steps'))
+  expect(steps).toBeGreaterThan(0)
+  expect(steps).toBeLessThanOrEqual(STEP_BUDGET)
+}
 
 /*
  * The milestones' exit criteria (docs/ROADMAP.md), as a visitor sees them.
@@ -128,7 +138,7 @@ const M3_EXAMPLES = [
   },
 ]
 
-test.describe('M3: the examples animate end to end and validate', () => {
+test.describe('M3: the examples animate end to end within the ~30 s budget, and validate', () => {
   for (const { name, setup, sql, node, rows } of M3_EXAMPLES) {
     test(name, async ({ page }) => {
       await openApp(page)
@@ -136,11 +146,23 @@ test.describe('M3: the examples animate end to end and validate', () => {
       await runSql(page, sql)
       await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres')
       await expect(page.getByTestId('viz-mismatch')).toHaveCount(0)
+      await expectWithinBudget(page)
 
       await page.getByTestId('player').getByRole('button', { name: 'To the end', exact: true }).click()
       await expect(page.getByTestId('viz-caption')).toHaveText(`${node} has no more rows: it sent ${rows} to the result.`)
       await expect(page.getByTestId('rows-filling')).toHaveCount(0)
       await expect(page.getByTestId('run-status')).toContainText(`SELECT: ${rows}`)
+    })
+  }
+})
+
+test.describe('M3: M2’s examples animate within the ~30 s budget too', () => {
+  for (const { example, sql } of M2_EXAMPLES) {
+    test(`example ${example}`, async ({ page }) => {
+      await openApp(page)
+      await runSql(page, sql)
+      await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres')
+      await expectWithinBudget(page)
     })
   }
 })

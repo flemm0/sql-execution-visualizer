@@ -1,6 +1,6 @@
 # 0027: One player step per trace event; the state is rebuilt for each step
 
-- **Status:** Accepted; the last bullet of the decision (a player per visualization, keyed by run) is superseded by [0029](0029-results-follow-the-player.md)
+- **Status:** Accepted; the first bullet of the decision (one step is one trace event) is superseded by [0041](0041-condensed-steps-over-the-trace.md), and the last (a player per visualization, keyed by run) by [0029](0029-results-follow-the-player.md)
 - **Date:** 2026-10-10
 
 ## Context

@@ -5,12 +5,19 @@ const integer = new Intl.NumberFormat('en-US')
 /**
  * The player's controls (docs/UX.md#playback): to the start, step back,
  * play/pause, step forward, to the end, a timeline scrubber, the speed,
- * autoplay, and which step is showing.
+ * autoplay, and which step is showing (and how many events the steps
+ * condense, when stretches group them).
  */
 export function PlayerControls({ player }: { player: Player }) {
   const { position, steps, playing } = player
   return (
-    <div className="flex items-center gap-2 border-t border-line px-3 py-1.5" data-testid="player">
+    <div
+      className="flex items-center gap-2 border-t border-line px-3 py-1.5"
+      data-testid="player"
+      data-steps={steps}
+      data-events={player.totalEvents}
+      data-events-done={player.events}
+    >
       <button type="button" className="icon-btn" onClick={() => player.seek(0)} disabled={position === 0} aria-label="To the start">
         ⏮
       </button>
@@ -65,6 +72,15 @@ export function PlayerControls({ player }: { player: Player }) {
       <span className="font-mono text-fg-muted tabular-nums" data-testid="viz-step">
         step {integer.format(position)} / {integer.format(steps)}
       </span>
+      {player.totalEvents > steps && (
+        <span
+          className="font-mono text-fg-muted tabular-nums"
+          data-testid="viz-events"
+          title="Repetitive stretches of the trace play as one step each, so the animation fits in about 30 seconds. Expand one to step through its events."
+        >
+          ({integer.format(player.totalEvents)} events)
+        </span>
+      )}
     </div>
   )
 }

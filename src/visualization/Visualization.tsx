@@ -14,6 +14,7 @@ import {
   type PlaybackState,
   type SortView,
 } from '../player/playback'
+import { describeStretch, isStretch } from '../player/condense'
 import type { Player } from '../player/usePlayer'
 import { MAX_TRACED_ROWS, type HeapPageContents, type PageRef, type RowRef, type Trace, type TraceRelation } from '../replay/trace'
 import { allNodes, type Validation } from '../replay/validate'
@@ -59,7 +60,14 @@ export function Visualization({ plan, trace, validation, player, internals }: Vi
     return info
   }, [planNodes])
   const relations = useMemo(() => new Map(trace.relations.map((relation) => [relation.id, relation])), [trace])
-  const state = useMemo(() => stateAt(trace, nodeInfo, player.position), [trace, nodeInfo, player.position])
+  const state = useMemo(() => stateAt(trace, nodeInfo, player.events), [trace, nodeInfo, player.events])
+  // A stretch (several events played as one step) gets a caption summing up its events.
+  const step = player.current
+  const stretchCaption = useMemo(
+    () => (step !== null && isStretch(step) ? describeStretch(trace, nodeInfo, step) : null),
+    [trace, nodeInfo, step],
+  )
+  const caption = player.position === 0 ? readyCaption(player, state.caption) : (stretchCaption ?? state.caption)
   const node = state.lastNode === null ? (planNodes.get(0) ?? null) : (planNodes.get(state.lastNode) ?? null)
 
   return (
@@ -78,11 +86,52 @@ export function Visualization({ plan, trace, validation, player, internals }: Vi
         <HeapZone state={state} trace={trace} internals={internals} />
         {state.sort && <SortZone sort={state.sort} />}
       </div>
-      <p className="border-t border-line px-3 py-2 text-sm" aria-live="polite" data-testid="viz-caption">
-        {state.caption}
-      </p>
+      <div className="flex items-start gap-3 border-t border-line px-3 py-2">
+        <p className="flex-1 text-sm" aria-live="polite" data-testid="viz-caption">
+          {caption}
+        </p>
+        <StretchControl player={player} />
+      </div>
       <PlayerControls player={player} />
     </div>
+  )
+}
+
+/** The caption before the first step: how many steps there are, and how many events they condense. */
+function readyCaption(player: Player, uncondensed: string): string {
+  if (player.totalEvents <= player.steps) return uncondensed
+  return `Ready to replay ${integer.format(player.totalEvents)} events in ${integer.format(player.steps)} steps: repetitive stretches play as one step each, and any of them can be expanded. Press play, or step through them one at a time.`
+}
+
+/**
+ * On a stretch, how many events it groups and a button to expand it; inside
+ * an expanded stretch, which of its events this is and a button to collapse
+ * it again.
+ */
+function StretchControl({ player }: { player: Player }) {
+  const step = player.current
+  if (step === null) return null
+  if (isStretch(step)) {
+    return (
+      <p className="flex shrink-0 items-center gap-2 text-fg-muted" data-testid="viz-stretch" data-kind="stretch">
+        <span>stretch of {integer.format(step.end - step.start)} events</span>
+        <button type="button" className="btn text-xs" onClick={player.expand}>
+          Expand
+        </button>
+      </p>
+    )
+  }
+  if (step.stretch === undefined) return null
+  const count = step.stretch.end - step.stretch.start
+  return (
+    <p className="flex shrink-0 items-center gap-2 text-fg-muted" data-testid="viz-stretch" data-kind="expanded">
+      <span>
+        event {integer.format(step.start - step.stretch.start + 1)} of {integer.format(count)} in an expanded stretch
+      </span>
+      <button type="button" className="btn text-xs" onClick={player.collapse}>
+        Collapse
+      </button>
+    </p>
   )
 }
 
