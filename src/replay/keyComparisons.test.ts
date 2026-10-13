@@ -13,7 +13,7 @@ beforeAll(async () => {
 afterAll(() => db.close())
 
 function column(type: string, collation: string | null = null): IndexColumn {
-  return { name: 'c', type, isKey: true, collation, descending: false, nullsFirst: false, defaultOrder: true }
+  return { name: 'c', expression: null, type, isKey: true, collation, descending: false, nullsFirst: false, defaultOrder: true }
 }
 
 describe('KeyComparisons', () => {

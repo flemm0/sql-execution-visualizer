@@ -164,6 +164,11 @@ export interface BtreeItem {
 export interface IndexColumn {
   /** The table column it holds; null for an expression, e.g. lower(email). */
   name: string | null
+  /**
+   * The expression it holds, as Postgres writes it in the index's definition,
+   * e.g. "lower(email)" (columns unqualified); null for a table column.
+   */
+  expression: string | null
   /** Its type's name in pg_type, e.g. "int4", "text", "timestamptz". */
   type: string
   /** A key column orders the index; the others are INCLUDE columns, stored on leaf pages only. */
@@ -298,6 +303,7 @@ export async function readIndexColumns(db: PGliteInterface, index: Relation): Pr
   // the last three have entries for key columns only.
   const result = await query<{
     name: string | null
+    expression: string | null
     type: string
     is_key: boolean
     collation: string | null
@@ -305,6 +311,7 @@ export async function readIndexColumns(db: PGliteInterface, index: Relation): Pr
     default_order: boolean | null
   }>(db, `
     SELECT CASE WHEN i.indkey[a.attnum - 1] = 0 THEN NULL ELSE ta.attname::text END AS name,
+      CASE WHEN i.indkey[a.attnum - 1] = 0 THEN pg_get_indexdef(i.indexrelid, a.attnum, false) END AS expression,
       t.typname::text AS type, a.attnum <= i.indnkeyatts AS is_key,
       CASE WHEN i.indcollation[a.attnum - 1] <> 0 THEN i.indcollation[a.attnum - 1]::regcollation::text END AS collation,
       i.indoption[a.attnum - 1]::int AS option, oc.opcdefault AS default_order
@@ -318,6 +325,7 @@ export async function readIndexColumns(db: PGliteInterface, index: Relation): Pr
   `)
   return result.rows.map((row) => ({
     name: row.name,
+    expression: row.expression,
     type: row.type,
     isKey: row.is_key,
     collation: row.collation,
