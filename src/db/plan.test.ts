@@ -108,6 +108,14 @@ describe('plan nodes', () => {
   })
 })
 
+describe('sort nodes', () => {
+  it('carry their sort keys, as ORDER BY items, and how they sorted', async () => {
+    const sort = (await planFor('SELECT * FROM orders o WHERE customer_id = 42 ORDER BY o.total DESC, o.id LIMIT 2')).root.children[0]
+    expect(sort).toMatchObject({ nodeType: 'Sort', sortKeys: ['o.total DESC', 'o.id'], sortMethod: 'quicksort' })
+    expect((await planFor('SELECT * FROM categories')).root).toMatchObject({ sortKeys: [], sortMethod: null })
+  })
+})
+
 describe('index scan nodes', () => {
   it('carry their index, Index Cond, direction and number of searches', async () => {
     const scan = (await planFor('SELECT * FROM orders o WHERE o.id BETWEEN 10 AND 20')).root

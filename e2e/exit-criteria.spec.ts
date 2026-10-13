@@ -103,6 +103,18 @@ const M3_EXAMPLES = [
     rows: '3 rows',
   },
   {
+    name: 'example 10: the latest orders first, read backward from the index, the Limit stopping at 3',
+    sql: 'SELECT * FROM orders WHERE customer_id = 42 ORDER BY order_date DESC LIMIT 3;',
+    node: 'Limit',
+    rows: '3 rows',
+  },
+  {
+    name: 'example 10: the largest totals first, a Sort of every matching row under the Limit',
+    sql: 'SELECT * FROM orders WHERE customer_id = 42 ORDER BY total DESC LIMIT 10;',
+    node: 'Limit',
+    rows: '3 rows',
+  },
+  {
     name: 'example 12: ids in the table’s order, an Index Scan',
     sql: 'SELECT * FROM orders WHERE id BETWEEN 1 AND 500;',
     node: 'Index Scan using orders_pkey on orders',

@@ -4,6 +4,7 @@ import type { PlanNode } from '../db/plan'
 import type { IndexStep } from './btreeScan'
 import type { SharedBuffers } from './buffers'
 import { entryTids, fetchRows, tidText, type FetchedRow, type IndexWalk } from './indexScan'
+import { unusedReadAheadEvents } from './readStream'
 import type { TraceEvent } from './trace'
 
 /*
@@ -28,13 +29,18 @@ import type { TraceEvent } from './trace'
  *
  * Step 1's walk runs before the query does (walkIndexScan), like an index
  * scan's; the rest after (replayBitmapScan).
+ *
+ * Under a Limit, the heap scan stops as soon as it has passed up the rows the
+ * Limit needs. By then it has asked for pages ahead that it won't use
+ * (readStream.ts).
  */
 
 /**
- * The trace of a Bitmap Heap Scan at the top of the plan (`heapNode`) over
- * a Bitmap Index Scan (`indexNode`), from the index scan's walk, after the
- * query has run: asks Postgres which version of each marked row the query
- * sees, and whether it passes the Filter.
+ * The trace of a Bitmap Heap Scan (`heapNode`) over a Bitmap Index Scan
+ * (`indexNode`), from the index scan's walk, after the query has run: asks
+ * Postgres which version of each marked row the query sees, and whether it
+ * passes the Filter. `rowsNeeded`: the most rows its parent will ask for (a
+ * Limit's), null for all.
  */
 export async function replayBitmapScan(
   db: PGliteInterface,
@@ -44,9 +50,10 @@ export async function replayBitmapScan(
   index: Relation,
   walk: IndexWalk,
   buffers: SharedBuffers,
+  rowsNeeded: number | null,
 ): Promise<TraceEvent[]> {
   const rows = await fetchRows(db, heapNode, table, entryTids(walk))
-  return [...bitmapScanEvents(heapNode, indexNode, table, index, walk.steps, rows, buffers)]
+  return [...bitmapScanEvents(heapNode, indexNode, table, index, walk.steps, rows, buffers, rowsNeeded)]
 }
 
 /**
@@ -69,7 +76,9 @@ export function bitmapPages(tids: Tid[]): { block: number; offsets: number[] }[]
  * The trace: the Bitmap Index Scan's pages and matching entries, each
  * entry's row marked in the bitmap; then each heap page the bitmap marks,
  * in order, as one hit or read, and each marked row on it, checked, and
- * sent to the result if it passes.
+ * passed up if it passes. With `rowsNeeded`, the heap scan stops after
+ * passing up that many, and doesn't finish; then come the pages it asked for
+ * ahead and won't use.
  */
 export function* bitmapScanEvents(
   heapNode: PlanNode,
@@ -79,6 +88,7 @@ export function* bitmapScanEvents(
   steps: IndexStep[],
   rows: Map<string, FetchedRow>,
   buffers: SharedBuffers,
+  rowsNeeded: number | null = null,
 ): Generator<TraceEvent> {
   yield { type: 'node.start', node: heapNode.id }
 
@@ -102,8 +112,11 @@ export function* bitmapScanEvents(
   yield { type: 'node.finish', node: indexNode.id }
 
   // 2. The Bitmap Heap Scan reads each page the bitmap marks, in order.
-  let resultIndex = 0
-  for (const { block, offsets } of bitmapPages(marked)) {
+  const pages = bitmapPages(marked)
+  const blocks = pages.map((page) => page.block)
+  const cachedAtStart = blocks.map((block) => buffers.has({ relation: table.oid, block }))
+  let passed = 0
+  for (const [position, { block, offsets }] of pages.entries()) {
     const page = { relation: table.oid, block }
     yield { type: buffers.access(page), node: heapNode.id, page }
     for (const offset of offsets) {
@@ -112,7 +125,13 @@ export function* bitmapScanEvents(
       const visible = fetched.visible === null ? null : { relation: table.oid, ...fetched.visible }
       yield { type: 'heap.tuple', node: heapNode.id, row, visible, matched: fetched.matched }
       if (visible !== null && fetched.matched) {
-        yield { type: 'row.emit', node: heapNode.id, row: visible, resultIndex: resultIndex++ }
+        yield { type: 'row.emit', node: heapNode.id, row: visible, resultIndex: null }
+        passed++
+      }
+      if (rowsNeeded !== null && passed >= rowsNeeded) {
+        // Stopped: the Limit above has all it needs.
+        yield* unusedReadAheadEvents(heapNode.id, table.oid, blocks, cachedAtStart, position + 1, buffers)
+        return
       }
     }
   }

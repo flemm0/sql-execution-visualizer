@@ -54,6 +54,8 @@ export interface BufferHitEvent {
   type: 'buffer.hit'
   node: number
   page: PageRef
+  /** See BufferReadEvent. */
+  ahead?: true
 }
 
 /** A node asks for a page that isn't in shared buffers, so it's read from disk into a buffer. */
@@ -61,6 +63,14 @@ export interface BufferReadEvent {
   type: 'buffer.read'
   node: number
   page: PageRef
+  /**
+   * True for a page the scan asked for ahead of time and never got to: a
+   * Seq Scan or Bitmap Heap Scan reads (or pins) the pages it will need next
+   * in batches (Postgres 18's read stream), and a Limit stopped it before it
+   * reached this one. Shown when the scan stops. Absent for a page the scan
+   * goes through: its access is drawn when the scan reaches it.
+   */
+  ahead?: true
 }
 
 /**
@@ -74,24 +84,37 @@ export interface HeapPageEvent {
   node: number
   page: PageRef
   visibleRows: number
-  /** Rows that passed the filter (all visible rows when there is none). */
+  /**
+   * When a Limit stopped the scan part way through the page, the visible rows
+   * it got to: the filter was checked on those only. Absent when it went
+   * through all of them.
+   */
+  checkedRows?: number
+  /** Rows that passed the filter (all visible rows when there is none), of those it checked. */
   matchedRows: number
 }
 
 /**
  * An index scan starts a search down its index, from the root, for the first
- * entry that can match. The pages it goes through follow as index.visit events.
+ * entry that can match (for a backward scan, the last). The pages it goes
+ * through follow as index.visit events.
  */
 export interface IndexSearchEvent {
   type: 'index.search'
   node: number
   /** The index's relation id. */
   index: number
+  /**
+   * True for a backward scan: it reads entries from high keys to low, and
+   * moves to the page on the left for more. Absent for a forward scan.
+   */
+  backward?: true
 }
 
 /**
  * An index scan looks at an index page: on the way down from the root, or
- * moving right to the next leaf page for more matches.
+ * moving to the next leaf page for more matches (to the right, or for a
+ * backward scan, to the left).
  */
 export interface IndexVisitEvent {
   type: 'index.visit'
@@ -101,8 +124,8 @@ export interface IndexVisitEvent {
   level: number
   /**
    * On the way down, the item (its offset on the page) whose child page the
-   * search goes to next; null on a leaf page, or when the search moves right
-   * to the page's neighbor instead.
+   * search goes to next; null on a leaf page, or when the search moves to the
+   * page's neighbor instead.
    */
   downlink: number | null
 }
@@ -187,6 +210,67 @@ export interface RowEmitEvent {
   resultIndex: number | null
 }
 
+/**
+ * A Sort whose parent needs only its first rows (a Limit's bound) holds more
+ * than twice that many, so it switches to a top-N heapsort: it keeps the best
+ * rows in a heap, with the worst of them on top to compare new rows with,
+ * and drops the others.
+ */
+export interface SortHeapEvent {
+  type: 'sort.heap'
+  node: number
+  /** The rows it keeps, as many as its parent needs. */
+  kept: RowRef[]
+  /** The rows it drops. */
+  dropped: RowRef[]
+}
+
+/** In a top-N heapsort, a row from below sorts before the worst row kept, and takes its place. */
+export interface SortKeepEvent {
+  type: 'sort.keep'
+  node: number
+  row: RowRef
+  /** The worst row kept until now, dropped. */
+  replaced: RowRef
+}
+
+/** In a top-N heapsort, a row from below doesn't sort before the worst row kept, so it's dropped. */
+export interface SortDiscardEvent {
+  type: 'sort.discard'
+  node: number
+  row: RowRef
+}
+
+/**
+ * A Sort has every row from below, and sorts the ones it holds, in memory.
+ * Then it passes them on in order (row.emit events).
+ */
+export interface SortDoneEvent {
+  type: 'sort.done'
+  node: number
+  /** How many rows it holds, sorted: all it got, or for a top-N heapsort, the best ones. */
+  rows: number
+  method: 'quicksort' | 'top-N heapsort'
+}
+
+/** A Limit skips a row from below, for its OFFSET. */
+export interface LimitSkipEvent {
+  type: 'limit.skip'
+  node: number
+  row: RowRef
+}
+
+/**
+ * A Limit has passed on all the rows it may (its LIMIT), so it stops asking
+ * for more. The nodes below it still working stop where they are.
+ */
+export interface LimitStopEvent {
+  type: 'limit.stop'
+  node: number
+  /** The nodes below it that hadn't finished, stopped early (none for LIMIT 0, which asks for nothing). */
+  stopped: number[]
+}
+
 export type TraceEvent =
   | NodeStartEvent
   | NodeFinishEvent
@@ -200,6 +284,12 @@ export type TraceEvent =
   | HeapTupleEvent
   | VisibilityCheckEvent
   | RowEmitEvent
+  | SortHeapEvent
+  | SortKeepEvent
+  | SortDiscardEvent
+  | SortDoneEvent
+  | LimitSkipEvent
+  | LimitStopEvent
 
 /**
  * Whether an event passes a row on from its node: a row.emit, to its parent
@@ -249,9 +339,40 @@ export interface IndexPageContents {
   items: IndexItem[]
 }
 
+/** A row a Sort was given, with its sort key as Postgres wrote it. */
+export interface SortRow {
+  row: RowRef
+  /** Its sort key's values, one per key, as Postgres writes them (null for NULL). */
+  key: (string | null)[]
+  /** Its place in the sorted order, from 1; rows that tie on every key share one. */
+  rank: number
+}
+
+/** A Sort node's rows, so the visualization can show their keys and order them. */
+export interface SortContents {
+  node: number
+  /** The sort keys as the plan writes them, e.g. ["orders.total DESC"]. */
+  keys: string[]
+  /** Every row it was given, in the order they came. */
+  rows: SortRow[]
+}
+
+/** A Limit node's settings, as Postgres planned them. */
+export interface LimitContents {
+  node: number
+  /** Rows it skips first (OFFSET); 0 without one. */
+  offset: number
+  /** The most rows it passes on (LIMIT); null without one. */
+  count: number | null
+}
+
 export interface Trace {
   relations: TraceRelation[]
   events: TraceEvent[]
   /** Every index page the events visit, with its items, in the order first visited. */
   indexPages: IndexPageContents[]
+  /** The rows of each Sort in the plan. */
+  sorts: SortContents[]
+  /** Each Limit in the plan. */
+  limits: LimitContents[]
 }

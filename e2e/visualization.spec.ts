@@ -150,8 +150,10 @@ test('the result fills in as the animation emits rows, and Skip to end shows it 
 
 test('a query that can’t be animated shows its whole result at once', async ({ page }) => {
   await openApp(page)
-  await runSql(page, 'SELECT * FROM categories ORDER BY name;')
-  await expect(page.getByTestId('result-table').locator('tbody tr')).toHaveCount(12)
+  // Append isn't replayed yet.
+  await runSql(page, 'SELECT name FROM categories UNION ALL SELECT name FROM categories;')
+  await expect(page.getByTestId('replay-status')).toHaveText('Animation isn’t available yet for Append.')
+  await expect(page.getByTestId('result-table').locator('tbody tr')).toHaveCount(24)
   await expect(page.getByTestId('rows-filling')).toHaveCount(0)
 })
 
@@ -297,4 +299,103 @@ test('example 6: a bitmap scan marks every matching row first, then reads each o
   await expect(viz(page).getByTestId('viz-bitmap')).toHaveText('bitmap: 944 rows on 480 pages · 480 of 480 read')
   await expect(minimap('bitmap')).toHaveCount(0)
   await expect(minimap('result')).toHaveCount(480)
+})
+
+test('example 10: a Limit takes the latest 3 orders from a backward index scan, then stops it', async ({ page }) => {
+  await openApp(page)
+  await runSql(page, 'SELECT * FROM orders WHERE customer_id = 42 ORDER BY order_date DESC LIMIT 3;')
+  await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres')
+  await control(page, 'To the end').click()
+  await expect(caption(page)).toHaveText('Limit has no more rows: it sent 3 rows to the result.')
+  // The result is the latest orders first.
+  const dates = await page.getByTestId('result-table').locator('tbody tr td:nth-child(3)').allTextContents()
+  expect(dates).toEqual([...dates].sort().reverse())
+
+  await control(page, 'Step back').click()
+  const scan = 'Index Scan Backward using orders_customer_id_order_date_idx on orders'
+  await expect(caption(page)).toHaveText(
+    `Limit has passed on its 3 rows (LIMIT 3), so it stops: it doesn’t ask ${scan} for another row, which stops where it is.`,
+  )
+  await expect(viz(page).getByTestId('viz-limit')).toHaveText('Limit · LIMIT 3: 3 passed on · stopped: it asks for no more rows')
+  // The plan tree: the Limit still works, the scan below it was stopped before it finished.
+  const planNode = page.getByTestId('plan-node')
+  await expect(planNode.nth(0)).toHaveAttribute('data-status', 'active')
+  await expect(planNode.nth(1)).toHaveAttribute('data-status', 'stopped')
+  await expect(planNode.nth(1).getByTestId('plan-status')).toHaveText('stopped early')
+
+  // The search runs backward: for the last entry that can match.
+  await control(page, 'To the start').click()
+  for (let i = 0; i < 3; i++) await control(page, 'Step forward').click()
+  await expect(caption(page)).toHaveText(
+    'The scan reads orders_customer_id_order_date_idx backward, from high keys to low: it searches from the root for the last entry that can match.',
+  )
+})
+
+test('example 10: a Sort holds every matching order, sorts them by total, then passes them on in order', async ({ page }) => {
+  await openApp(page)
+  await runSql(page, 'SELECT * FROM orders WHERE customer_id = 42 ORDER BY total DESC LIMIT 10;')
+  await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres')
+  await control(page, 'Pause').click()
+  const timeline = page.getByRole('slider', { name: 'Timeline' })
+  const sort = viz(page).getByTestId('viz-sort')
+
+  // Step 23: the bitmap heap scan has passed its 3 rows up to the Sort, which holds them.
+  await timeline.fill('23')
+  await expect(caption(page)).toHaveText('Bitmap Heap Scan on orders has no more rows: it passed 3 rows up to Sort.')
+  await expect(sort.getByTestId('viz-sort-summary')).toHaveText('in memory: 3 rows')
+  await expect(sort.getByTestId('viz-sort-row')).toHaveCount(3)
+  await expect(page.getByTestId('rows-filling')).toContainText('0 of 3 so far')
+
+  await control(page, 'Step forward').click()
+  await expect(caption(page)).toHaveText(
+    'Sort has all 3 rows from below: it sorts them in memory by orders.total DESC (a quicksort), then passes them up to Limit in that order.',
+  )
+  await expect(sort.getByTestId('viz-sort-summary')).toHaveText('sorted 3 rows (quicksort) · 0 of 3 passed on')
+  await control(page, 'Step forward').click()
+  await expect(caption(page)).toHaveText(/^Row \(\d+,\d+\), 1st in sort order, goes up to Limit\.$/)
+  await control(page, 'Step forward').click()
+  await expect(caption(page)).toHaveText(/^Row \(\d+,\d+\) goes to the result as row 1 \(1 of the Limit’s 10\)\.$/)
+  await expect(page.getByTestId('rows-filling')).toContainText('1 of 3 so far')
+
+  await control(page, 'To the end').click()
+  await expect(sort.getByTestId('viz-sort-summary')).toHaveText('sorted 3 rows (quicksort) · 3 of 3 passed on')
+  const totals = await page.getByTestId('result-table').locator('tbody tr td:nth-child(5)').allTextContents()
+  expect(totals.map(Number)).toEqual([...totals.map(Number)].sort((a, b) => b - a))
+})
+
+test('a top-N heapsort keeps the best 10 of 50,000 orders as the Seq Scan passes them up', async ({ page }) => {
+  await openApp(page)
+  await runSql(page, 'SELECT * FROM orders ORDER BY total DESC LIMIT 10;')
+  await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres', { timeout: 30_000 })
+  await control(page, 'Pause').click()
+  await page.getByRole('slider', { name: 'Timeline' }).fill('30001')
+  const sort = viz(page).getByTestId('viz-sort')
+  await expect(sort.getByTestId('viz-sort-summary')).toHaveText('top-N heapsort: keeps the best 10 · 14,833 seen · 14,823 dropped')
+  // The best 5 kept, then the worst: the one a new row has to beat.
+  await expect(sort.getByTestId('viz-sort-row')).toHaveCount(6)
+  await expect(sort.getByTestId('viz-sort-row').last()).toContainText('← worst kept')
+  await expect(caption(page)).toHaveText(/^Row \(175,1\) \(total [\d.]+\) doesn’t sort before the worst row kept, .+, so it’s dropped\.$/)
+  // While the scan gives it rows, the Sort works too.
+  await expect(viz(page).getByTestId('viz-node')).toContainText('Sort')
+  await expect(viz(page).getByTestId('viz-node')).toContainText('active')
+
+  await control(page, 'To the end').click()
+  await expect(sort.getByTestId('viz-sort-summary')).toHaveText('sorted 10 rows (top-N heapsort) · 10 of 10 passed on')
+})
+
+test('a Limit stops a Seq Scan part way, after it has read pages ahead it won’t use', async ({ page }) => {
+  await openApp(page)
+  await runSql(page, 'SELECT * FROM order_items LIMIT 500;')
+  await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres')
+  await control(page, 'To the end').click()
+  await expect(caption(page)).toHaveText('Limit has no more rows: it sent 500 rows to the result.')
+  // Pages 0 to 6 read: 4, 5 and 6 ahead of the scan, which stopped on page 3.
+  await expect(viz(page).getByTestId('viz-reads')).toHaveText('reads 7')
+  await expect(viz(page).locator('[data-testid="viz-slot"][data-ahead]')).toHaveText(['h4', 'h5', 'h6'])
+  await expect(viz(page).getByTestId('viz-heap-counts')).toHaveText(/· \d+ visible · \d+ checked before the stop · \d+ matched$/)
+  await control(page, 'Step back').click()
+  await expect(caption(page)).toHaveText(
+    'Heap page 6 had been read from disk into a buffer ahead of the scan, but the scan stopped before it got there. Postgres reads the pages a scan will need next in batches, and counts them all.',
+  )
+  await expect(page.getByTestId('plan-node').nth(1).getByTestId('plan-status')).toHaveText('stopped early')
 })

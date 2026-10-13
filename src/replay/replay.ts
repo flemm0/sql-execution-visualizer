@@ -1,13 +1,16 @@
 import type { PGliteInterface } from '@electric-sql/pglite'
 import { readVisibilityMap, type CacheSnapshot, type Relation, type VisibilityMap } from '../db/inspector'
-import type { Plan, PlanNode } from '../db/plan'
+import type { Plan, PlanNode, ScannedTable } from '../db/plan'
 import { query, queryText } from '../db/query'
 import { quoteIdentifier } from '../db/sql'
 import { replayBitmapScan } from './bitmapScan'
 import { SharedBuffers } from './buffers'
 import { entryTids, replayIndexScan, walkIndexScan, type IndexWalk } from './indexScan'
-import { scanPages, seqScanEvents } from './seqScan'
-import type { IndexPageContents, RowRef, Trace, TraceEvent } from './trace'
+import { childRowsNeeded, limitEvents } from './limit'
+import { readLimits, type LimitSettings } from './limits'
+import { scanPages, seqScanEvents, seqScanStop } from './seqScan'
+import { rankRows, sortContents, sortEvents, unsupportedSort } from './sort'
+import type { IndexPageContents, RowRef, SortContents, Trace, TraceEvent } from './trace'
 import { Unsupported } from './unsupported'
 import { allNodes, validate, type Validation } from './validate'
 
@@ -26,6 +29,8 @@ export type Replay =
   | { status: 'failed'; message: string }
 
 export interface ReplayInput {
+  /** The query, as it ran. */
+  sql: string
   plan: Plan
   /** The query's tables and indexes. */
   relations: Relation[]
@@ -54,26 +59,41 @@ export interface WalkedIndex {
 }
 
 /** Node types the replay engine can replay. */
-const REPLAYABLE = new Set(['Seq Scan', 'Index Scan', 'Index Only Scan', 'Bitmap Heap Scan', 'Bitmap Index Scan'])
+const REPLAYABLE = new Set(['Seq Scan', 'Index Scan', 'Index Only Scan', 'Bitmap Heap Scan', 'Bitmap Index Scan', 'Sort', 'Limit'])
 
 /** Node types that read a B-tree index and fetch the rows its entries point at. */
 const INDEX_SCANS = new Set(['Index Scan', 'Index Only Scan'])
 
 /**
- * The plan shapes the replay engine can replay: one scan, or a Bitmap Heap
- * Scan reading the bitmap of one Bitmap Index Scan. For each, the node that
- * reads the table, and the one that reads an index (the same node for an
- * index scan; null for a Seq Scan). Null for any other shape: a scan with
- * children runs a subquery for a condition (an InitPlan or SubPlan).
+ * The plan shapes the replay engine can replay: Limit and Sort nodes, each
+ * over one child, above one scan, or a Bitmap Heap Scan reading the bitmap
+ * of one Bitmap Index Scan. `above` holds the Limit and Sort nodes, from the
+ * top down; `tableScan` is the node that reads the table, and `indexScan`
+ * the one that reads an index (the same node for an index scan; null for a
+ * Seq Scan). Null for any other shape: a node with more children runs a
+ * subquery (an InitPlan or SubPlan).
  */
-function planScans(root: PlanNode): { tableScan: PlanNode; indexScan: PlanNode | null } | null {
-  if (root.nodeType === 'Bitmap Heap Scan') {
-    const [child] = root.children
-    const single = root.children.length === 1 && child.nodeType === 'Bitmap Index Scan' && child.children.length === 0
-    return single ? { tableScan: root, indexScan: child } : null
+interface PlanShape {
+  above: PlanNode[]
+  tableScan: PlanNode
+  indexScan: PlanNode | null
+}
+
+function planShape(root: PlanNode): PlanShape | null {
+  const above: PlanNode[] = []
+  let node = root
+  while (node.nodeType === 'Limit' || node.nodeType === 'Sort') {
+    if (node.children.length !== 1) return null
+    above.push(node)
+    node = node.children[0]
   }
-  if (root.children.length > 0) return null
-  return { tableScan: root, indexScan: INDEX_SCANS.has(root.nodeType) ? root : null }
+  if (node.nodeType === 'Bitmap Heap Scan') {
+    const [child] = node.children
+    const single = node.children.length === 1 && child.nodeType === 'Bitmap Index Scan' && child.children.length === 0
+    return single ? { above, tableScan: node, indexScan: child } : null
+  }
+  if (node.children.length > 0) return null
+  return { above, tableScan: node, indexScan: INDEX_SCANS.has(node.nodeType) ? node : null }
 }
 
 /**
@@ -91,7 +111,7 @@ function planScans(root: PlanNode): { tableScan: PlanNode; indexScan: PlanNode |
  * Returns null when there's nothing to do before the query runs.
  */
 export async function prepareReplay(db: PGliteInterface, plan: Plan, relations: Relation[]): Promise<Prepared | null> {
-  const scans = planScans(plan.root)
+  const scans = planShape(plan.root)
   if (scans === null || scans.indexScan === null) return null
   const found = scanRelations(scans.tableScan, scans.indexScan, relations)
   if (found === null || found.index === null) return null
@@ -154,39 +174,24 @@ export async function replayQuery(db: PGliteInterface, input: ReplayInput): Prom
   const root = plan.root
   const missing = allNodes(root).find((node) => !REPLAYABLE.has(node.nodeType))
   if (missing) return { status: 'unsupported', reason: `Animation isn’t available yet for ${missing.nodeType}.` }
-  const scans = planScans(root)
-  if (scans === null) return { status: 'unsupported', reason: 'Animation isn’t available yet for subqueries.' }
-  const found = scanRelations(scans.tableScan, scans.indexScan, relations)
+  const shape = planShape(root)
+  if (shape === null) return { status: 'unsupported', reason: 'Animation isn’t available yet for subqueries.' }
+  const found = scanRelations(shape.tableScan, shape.indexScan, relations)
   if (found === null) {
     return {
       status: 'unsupported',
       reason: 'Animation isn’t available for temporary tables, which Postgres keeps outside shared buffers.',
     }
   }
-
-  const { table, index } = found
+  for (const node of shape.above) {
+    const reason = node.nodeType === 'Sort' ? unsupportedSort(node) : null
+    if (reason !== null) return { status: 'unsupported', reason }
+  }
 
   try {
-    const buffers = new SharedBuffers(input.cacheBefore, relations)
-    let events: TraceEvent[]
-    const notes: string[] = []
-    let skipScan = false
-    let indexPages: IndexPageContents[] = []
-    const indexScan = scans.indexScan
-    if (indexScan !== null) {
-      if (index === null) throw new Error(`${indexScan.title}: no index ${indexScan.indexName}`)
-      if (root.lossyHeapBlocks !== null && root.lossyHeapBlocks > 0) throw new Unsupported(LOSSY_REASON)
-      const { walk, visibilityMap } = await indexWalk(db, indexScan, root, table, index, input.prepared)
-      skipScan = walk.skipScan
-      indexPages = walk.pages
-      events =
-        indexScan === root
-          ? await replayIndexScan(db, root, table, index, walk, visibilityMap, buffers)
-          : await replayBitmapScan(db, root, indexScan, table, index, walk, buffers)
-    } else {
-      events = [...seqScanEvents(root, table, await scanPages(db, root, table), buffers)]
-      notes.push(...(await ringBufferNotes(db, table)))
-    }
+    const limits = await limitSettings(db, input.sql, shape.above)
+    const replayer = new PlanReplayer(db, input, shape, found.table, found.index, limits)
+    const events = numberResultRows([...(await replayer.events(root, null))], root.id)
     const trace: Trace = {
       relations: relations.map((relation) => ({
         id: relation.oid,
@@ -195,12 +200,18 @@ export async function replayQuery(db: PGliteInterface, input: ReplayInput): Prom
         pages: relation.pages,
       })),
       events,
-      indexPages,
+      indexPages: replayer.indexPages,
+      sorts: replayer.sorts,
+      limits: [...limits].map(([node, { offset, count }]) => ({ node, offset, count })),
     }
 
+    const notes = [...replayer.notes]
     let replayedRows: (string | null)[][] | null = null
-    if (root.output.length === input.columnCount) {
-      replayedRows = await readRows(db, root, emittedRows(trace.events).slice(0, input.resultRows.length))
+    // A Sort or Limit at the top can output the sort keys after the result's columns.
+    if (root.output.length >= input.columnCount && shape.tableScan.relation !== null) {
+      const output = root.output.slice(0, input.columnCount)
+      const rows = emittedRows(trace.events).slice(0, input.resultRows.length)
+      replayedRows = await readRows(db, shape.tableScan.relation, output, rows)
     } else {
       notes.push('The plan’s output columns don’t line up with the result’s, so values weren’t compared.')
     }
@@ -213,12 +224,141 @@ export async function replayQuery(db: PGliteInterface, input: ReplayInput): Prom
       replayedRows,
       notes,
     })
-    if (skipScan && onlyMoreHits(validation)) validation.notes.push(CATALOG_NOTE)
+    if (replayer.skipScan && onlyMoreHits(validation)) validation.notes.push(CATALOG_NOTE)
     return { status: 'replayed', trace, validation }
   } catch (error) {
     if (error instanceof Unsupported) return { status: 'unsupported', reason: error.message }
     return { status: 'failed', message: error instanceof Error ? error.message : String(error) }
   }
+}
+
+/**
+ * Builds a plan's trace, node by node, from the scan up. Each node is told
+ * how many rows its parent will ask it for (`rowsNeeded`, null for all): a
+ * Limit asks for only so many, and the nodes below it stop there, as they do
+ * in Postgres, where the Limit simply stops asking.
+ */
+class PlanReplayer {
+  /** Every index page the scan read, for the trace. */
+  indexPages: IndexPageContents[] = []
+  sorts: SortContents[] = []
+  notes: string[] = []
+  /** Whether the index scan is a skip scan (see CATALOG_NOTE). */
+  skipScan = false
+
+  private db: PGliteInterface
+  private input: ReplayInput
+  private shape: PlanShape
+  private table: Relation
+  private index: Relation | null
+  private limits: Map<number, LimitSettings>
+  private buffers: SharedBuffers
+
+  constructor(
+    db: PGliteInterface,
+    input: ReplayInput,
+    shape: PlanShape,
+    table: Relation,
+    index: Relation | null,
+    limits: Map<number, LimitSettings>,
+  ) {
+    this.db = db
+    this.input = input
+    this.shape = shape
+    this.table = table
+    this.index = index
+    this.limits = limits
+    this.buffers = new SharedBuffers(input.cacheBefore, input.relations)
+  }
+
+  /**
+   * A node's events, and its children's, in the executor's order. A node
+   * whose parent asks it for no rows (under LIMIT 0) never starts.
+   */
+  async events(node: PlanNode, rowsNeeded: number | null): Promise<Iterable<TraceEvent>> {
+    if (rowsNeeded === 0) return []
+    if (node.nodeType === 'Limit') {
+      const settings = this.limits.get(node.id) as LimitSettings
+      // LIMIT 0 asks its child for nothing.
+      const child = settings.count === 0 ? [] : await this.events(node.children[0], childRowsNeeded(settings, rowsNeeded))
+      return limitEvents(node, child, settings, rowsNeeded)
+    }
+    if (node.nodeType === 'Sort') {
+      // A Sort reads all its input before it passes on a row.
+      const childEvents = [...(await this.events(node.children[0], null))]
+      const child = node.children[0].id
+      const input = childEvents.flatMap((event) => (event.type === 'row.emit' && event.node === child ? [event.row] : []))
+      const table = this.shape.tableScan.relation
+      if (table === null) throw new Error(`${this.shape.tableScan.title} names no table`)
+      const rows = await rankRows(this.db, node, table, input)
+      this.sorts.push(sortContents(node, rows))
+      return sortEvents(node, childEvents, rows, this.sortBound(node), rowsNeeded)
+    }
+    return this.scanEvents(rowsNeeded)
+  }
+
+  /**
+   * The bound a Limit directly above a Sort gives it (ExecSetTupleBound): the
+   * rows it will ask for, LIMIT + OFFSET. Null without one.
+   */
+  private sortBound(sort: PlanNode): number | null {
+    const parent = this.shape.above.find((node) => node.children[0] === sort)
+    const settings = parent?.nodeType === 'Limit' ? this.limits.get(parent.id) : undefined
+    if (settings === undefined || settings.count === null) return null
+    return settings.count + settings.offset
+  }
+
+  /** The scan's events: a Seq Scan, an index scan, or a bitmap scan. */
+  private async scanEvents(rowsNeeded: number | null): Promise<TraceEvent[]> {
+    const { tableScan, indexScan } = this.shape
+    const { db, table, index, buffers } = this
+    if (indexScan === null) {
+      const pages = await scanPages(db, tableScan, table)
+      const stop = await seqScanStop(db, tableScan, pages, rowsNeeded)
+      this.notes.push(...(await ringBufferNotes(db, table)))
+      return [...seqScanEvents(tableScan, table, pages, buffers, stop)]
+    }
+    if (index === null) throw new Error(`${indexScan.title}: no index ${indexScan.indexName}`)
+    if (tableScan.lossyHeapBlocks !== null && tableScan.lossyHeapBlocks > 0) throw new Unsupported(LOSSY_REASON)
+    const { walk, visibilityMap } = await indexWalk(db, indexScan, tableScan, table, index, this.input.prepared)
+    this.skipScan = walk.skipScan
+    this.indexPages = walk.pages
+    return indexScan === tableScan
+      ? replayIndexScan(db, tableScan, table, index, walk, visibilityMap, buffers, rowsNeeded)
+      : replayBitmapScan(db, tableScan, indexScan, table, index, walk, buffers, rowsNeeded)
+  }
+}
+
+/**
+ * Each Limit node's LIMIT and OFFSET, read from the plan Postgres makes for
+ * the query (limits.ts), by node id. Both list the Limit nodes outermost
+ * first. Throws Unsupported for one the replay can't use.
+ */
+async function limitSettings(db: PGliteInterface, sql: string, above: PlanNode[]): Promise<Map<number, LimitSettings>> {
+  const settings = new Map<number, LimitSettings>()
+  const limitNodes = above.filter((node) => node.nodeType === 'Limit')
+  if (limitNodes.length === 0) return settings
+  const readings = await readLimits(db, sql)
+  if (readings.length !== limitNodes.length) {
+    throw new Error(`Postgres’s plan has ${readings.length} Limit nodes, the plan that ran ${limitNodes.length}.`)
+  }
+  for (const [i, node] of limitNodes.entries()) {
+    const reading = readings[i]
+    if (reading.status === 'withTies') throw new Unsupported('Animation isn’t available yet for FETCH FIRST … WITH TIES.')
+    if (reading.status === 'notConstant') {
+      throw new Unsupported('Animation isn’t available yet for a LIMIT or OFFSET that is only known when the query runs.')
+    }
+    settings.set(node.id, reading.settings)
+  }
+  return settings
+}
+
+/** The events with the top node's rows numbered as the result's rows, from 0. */
+function numberResultRows(events: TraceEvent[], root: number): TraceEvent[] {
+  let resultIndex = 0
+  return events.map((event) =>
+    event.type === 'row.emit' && event.node === root ? { ...event, resultIndex: resultIndex++ } : event,
+  )
 }
 
 /**
@@ -280,17 +420,18 @@ function emittedRows(events: TraceEvent[]): RowRef[] {
 }
 
 /**
- * Reads the values a scan node outputs for the given rows of its table, by
- * ctid, in the order given, as Postgres's text (as the results pane shows them).
+ * Reads the values the plan outputs (`output`, expressions over the scanned
+ * table) for the given rows of the table, by ctid, in the order given, as
+ * Postgres's text (as the results pane shows them).
  */
-async function readRows(db: PGliteInterface, node: PlanNode, rows: RowRef[]): Promise<(string | null)[][]> {
-  if (rows.length === 0 || node.relation === null) return []
-  const { schema, name, alias } = node.relation
+async function readRows(db: PGliteInterface, table: ScannedTable, output: string[], rows: RowRef[]): Promise<(string | null)[][]> {
+  if (rows.length === 0) return []
+  const { schema, name, alias } = table
   const ctids = rows.map((row) => `'(${row.block},${row.offset})'`).join(', ')
   // The output expressions name the table's columns, as the plan prints them.
   return queryText(
     db,
-    `SELECT ${node.output.join(', ')}
+    `SELECT ${output.join(', ')}
      FROM unnest(ARRAY[${ctids}]::tid[]) WITH ORDINALITY AS replay_wanted(replay_tid, replay_position)
      JOIN ONLY ${quoteIdentifier(schema)}.${quoteIdentifier(name)} AS ${quoteIdentifier(alias)}
        ON ${quoteIdentifier(alias)}.ctid = replay_wanted.replay_tid

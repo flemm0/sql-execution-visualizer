@@ -17,16 +17,16 @@ import { quoteIdentifier } from '../db/sql'
 import { walkBtree, type IndexStep, type ScanKey } from './btreeScan'
 import type { SharedBuffers } from './buffers'
 import { canReadKeys } from './indexKeys'
-import type { IndexPageContents, TraceEvent } from './trace'
+import type { IndexPageContents, RowRef, TraceEvent } from './trace'
 import { Unsupported } from './unsupported'
 
 /*
- * Replays an Index Scan on a B-tree, the way Postgres 18's nbtree code runs one
- * forward:
+ * Replays an Index Scan on a B-tree, the way Postgres 18's nbtree code runs one:
  *
  * 1. Search down from the root for the first entry that can match, then read
  *    entries from there, left to right, moving on to the next leaf page while
- *    entries can still match. Each matching entry points at a heap row. With
+ *    entries can still match. A backward scan searches for the last entry
+ *    that can match and reads right to left, moving to the page on the left. Each matching entry points at a heap row. With
  *    a list of values (= ANY) or a skip scan, the scan may search down from
  *    the root again for the next value (btreeScan.ts).
  * 2. Fetch each of those rows from the heap, in index order, and check the
@@ -43,8 +43,8 @@ import { Unsupported } from './unsupported'
  * What's supported: conditions =, <, <=, >, >= (one value each) and = ANY
  * (a list) on the index's key columns (table columns or expressions, such as
  * lower(email)), at most one of each kind per column,
- * and = or = ANY alone. Backward scans aren't replayed yet; walkIndexScan
- * says so.
+ * and = or = ANY alone, forward or backward; but a backward scan with a list
+ * or a skip scan isn't replayed yet (walkBtree says so).
  */
 
 /** What fetching an index entry's heap row found. */
@@ -64,6 +64,8 @@ export interface IndexWalk {
   /** The index and condition walked for, to check the plan that ran is the same. */
   indexName: string
   indexCond: string | null
+  /** Whether the scan reads the index from high keys to low (ORDER BY ... DESC on an ascending index). */
+  backward: boolean
   steps: IndexStep[]
   /** Whether it's a skip scan: the scan moves through every value of an index column without a condition of =. */
   skipScan: boolean
@@ -82,10 +84,14 @@ export async function walkIndexScan(db: PGliteInterface, node: PlanNode, index: 
   if (index.accessMethod !== 'btree') {
     throw new Unsupported(`Animation isn’t available yet for ${index.accessMethod} indexes.`)
   }
-  if (node.backward) throw new Unsupported('Animation isn’t available yet for backward index scans.')
   const columns = await readIndexColumns(db, index)
   const keys = parseIndexCond(node.indexCond, alias, columns)
-  return { indexName: node.indexName, indexCond: node.indexCond, ...(await walkBtree(db, index, columns, keys)) }
+  return {
+    indexName: node.indexName,
+    indexCond: node.indexCond,
+    backward: node.backward,
+    ...(await walkBtree(db, index, columns, keys, node.backward)),
+  }
 }
 
 /**
@@ -93,7 +99,8 @@ export async function walkIndexScan(db: PGliteInterface, node: PlanNode, index: 
  * its walk of the index, after the query has run: fetches the rows the walk
  * found entries for, and finds the entries the scan marked dead.
  * `visibilityMap` is the table's map as an Index Only Scan found it, and null
- * for an Index Scan.
+ * for an Index Scan. `rowsNeeded`: the most rows its parent will ask for
+ * (a Limit's), null for all.
  */
 export async function replayIndexScan(
   db: PGliteInterface,
@@ -103,6 +110,7 @@ export async function replayIndexScan(
   walk: IndexWalk,
   visibilityMap: VisibilityMap | null,
   buffers: SharedBuffers,
+  rowsNeeded: number | null,
 ): Promise<TraceEvent[]> {
   // An Index Only Scan doesn't fetch rows on all-visible pages, but their
   // values are read by ctid to check the result, and the version it can see
@@ -110,7 +118,7 @@ export async function replayIndexScan(
   const tids = entryTids(walk)
   const rows = await fetchRows(db, node, table, tids)
   const dead = await markedDead(db, index, walk.steps)
-  return [...indexScanEvents(node, table, index, walk.steps, rows, dead, visibilityMap, buffers)]
+  return [...indexScanEvents(node, table, index, walk.steps, rows, dead, visibilityMap, buffers, rowsNeeded)]
 }
 
 /** The heap rows a walk's matching entries point at, in index order. */
@@ -401,6 +409,11 @@ function hotChain(page: HeapPage, offset: number): number[] {
  * page it last read pinned, so reading the map costs one buffer access for
  * the first entry (each map page covers tens of thousands of heap pages). A
  * table with no map yet costs none, and no page of it is all-visible.
+ *
+ * Under a Limit that needs only `rowsNeeded` rows, the scan stops after
+ * passing up that many, wherever it is; it doesn't finish. It marks the dead
+ * entries on its leaf when the query ends (btendscan), which EXPLAIN counts
+ * in no node's buffers.
  */
 export function* indexScanEvents(
   node: PlanNode,
@@ -411,6 +424,7 @@ export function* indexScanEvents(
   dead: Map<number, Set<number>>,
   visibilityMap: VisibilityMap | null,
   buffers: SharedBuffers,
+  rowsNeeded: number | null = null,
 ): Generator<TraceEvent> {
   yield { type: 'node.start', node: node.id }
   let pinned: number | null = null
@@ -418,21 +432,30 @@ export function* indexScanEvents(
   let pinnedMapPage: number | null = null
   /** The leaf page the scan is on, and the entries it returned from it. */
   let leaf: { block: number; returned: number[] } | null = null
-  let resultIndex = 0
-  function* leaveLeaf(): Generator<TraceEvent> {
+  let passed = 0
+  /** `access`: false when the scan was stopped, and marks them as the query ends. */
+  function* leaveLeaf(access = true): Generator<TraceEvent> {
     const marked = leaf === null ? [] : unique(leaf.returned.filter((offset) => dead.get(leaf?.block as number)?.has(offset)))
     if (leaf !== null && marked.length > 0) {
       const page = { relation: index.oid, block: leaf.block }
-      if (visibilityMap === null) yield { type: buffers.access(page), node: node.id, page }
+      if (visibilityMap === null && access) yield { type: buffers.access(page), node: node.id, page }
       yield { type: 'index.markDead', node: node.id, page, offsets: marked }
     }
     leaf = null
   }
+  /** Passes a row up to the parent, counting it. */
+  function passUp(row: RowRef): TraceEvent {
+    passed++
+    return { type: 'row.emit', node: node.id, row, resultIndex: null }
+  }
+  const enough = () => rowsNeeded !== null && passed >= rowsNeeded
 
   for (const step of steps) {
     if (step.kind === 'search') {
       yield* leaveLeaf()
-      yield { type: 'index.search', node: node.id, index: index.oid }
+      yield node.backward
+        ? { type: 'index.search', node: node.id, index: index.oid, backward: true }
+        : { type: 'index.search', node: node.id, index: index.oid }
     } else if (step.kind === 'visit') {
       if (step.page.isLeaf) {
         yield* leaveLeaf()
@@ -458,7 +481,8 @@ export function* indexScanEvents(
         }
         if (visibilityMap.allVisible.has(step.tid.block)) {
           yield { type: 'visibility.check', node: node.id, page: heapPage, row, allVisible: true, matched: fetched.matched }
-          if (fetched.matched) yield { type: 'row.emit', node: node.id, row: visible ?? row, resultIndex: resultIndex++ }
+          if (fetched.matched) yield passUp(visible ?? row)
+          if (enough()) break
           continue
         }
         yield { type: 'visibility.check', node: node.id, page: heapPage, row, allVisible: false, matched: null }
@@ -469,10 +493,14 @@ export function* indexScanEvents(
         yield { type: buffers.access(heapPage), node: node.id, page: heapPage }
       }
       yield { type: 'heap.tuple', node: node.id, row, visible, matched: fetched.matched }
-      if (visible !== null && fetched.matched) {
-        yield { type: 'row.emit', node: node.id, row: visible, resultIndex: resultIndex++ }
-      }
+      if (visible !== null && fetched.matched) yield passUp(visible)
+      if (enough()) break
     }
+  }
+  if (enough()) {
+    // Stopped: the Limit above has all it needs.
+    yield* leaveLeaf(false)
+    return
   }
   yield* leaveLeaf()
   yield { type: 'node.finish', node: node.id }

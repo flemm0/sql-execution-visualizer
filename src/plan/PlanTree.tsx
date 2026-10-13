@@ -60,7 +60,7 @@ function PlanNodeItem({ node, progress }: { node: PlanNode; progress: Map<number
           <span className="font-semibold text-fg">{node.title}</span>
           {sofar && (
             <span className={active ? 'text-fg' : 'text-fg-muted'} data-testid="plan-status">
-              {active ? '◀ active' : sofar.status}
+              {active ? '◀ active' : sofar.status === 'stopped' ? 'stopped early' : sofar.status}
             </span>
           )}
           <span className="font-mono text-fg-muted" data-testid="plan-rows">

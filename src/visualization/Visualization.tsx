@@ -1,15 +1,18 @@
-import { useMemo, type ReactNode } from 'react'
+import { Fragment, useMemo, type ReactNode } from 'react'
 import type { Plan, PlanNode } from '../db/plan'
 import {
   rowName,
+  shortKey,
   shortPageName,
   stateAt,
   type BitmapView,
   type HeapRow,
   type IndexView,
+  type LimitView,
   type NodeInfo,
   type PageMark,
   type PlaybackState,
+  type SortView,
 } from '../player/playback'
 import type { Player } from '../player/usePlayer'
 import type { PageRef, Trace, TraceRelation } from '../replay/trace'
@@ -42,6 +45,13 @@ export function Visualization({ plan, trace, validation, player }: Visualization
   const nodeInfo = useMemo(() => {
     const info = new Map<number, NodeInfo>()
     for (const node of planNodes.values()) info.set(node.id, { title: node.title, hasFilter: node.filter !== null })
+    // Each node passes its rows up to its parent.
+    for (const node of planNodes.values()) {
+      for (const child of node.children) {
+        const childInfo = info.get(child.id)
+        if (childInfo !== undefined) childInfo.parent = node.id
+      }
+    }
     return info
   }, [planNodes])
   const relations = useMemo(() => new Map(trace.relations.map((relation) => [relation.id, relation])), [trace])
@@ -51,6 +61,7 @@ export function Visualization({ plan, trace, validation, player }: Visualization
   return (
     <div className="flex h-full flex-col text-xs" data-testid="visualization">
       <NodeLine node={node} state={state} />
+      {state.limit && <LimitLine limit={state.limit} />}
       {!validation.ok && (
         <p className="border-b border-l-4 border-line border-l-rejected bg-surface-2 px-3 py-1.5" data-testid="viz-mismatch">
           The replay doesn’t match what Postgres reported (see the checks in the plan pane), so this animation may not
@@ -61,6 +72,7 @@ export function Visualization({ plan, trace, validation, player }: Visualization
         {state.index && <IndexZone view={state.index} state={state} trace={trace} />}
         <BuffersZone state={state} relations={relations} />
         <HeapZone state={state} />
+        {state.sort && <SortZone sort={state.sort} />}
       </div>
       <p className="border-t border-line px-3 py-2 text-sm" aria-live="polite" data-testid="viz-caption">
         {state.caption}
@@ -77,7 +89,14 @@ export function Visualization({ plan, trace, validation, player }: Visualization
  */
 function NodeLine({ node, state }: { node: PlanNode | null; state: PlaybackState }) {
   if (node === null) return null
-  const status = state.activeNode === node.id ? 'active' : state.position === 0 ? 'waiting' : 'done'
+  // A parent is active while its child works for it (a Sort while the scan below gives it rows).
+  const status = state.working.includes(node.id)
+    ? 'active'
+    : state.stopped.has(node.id)
+      ? 'stopped'
+      : state.position === 0
+        ? 'waiting'
+        : 'done'
   return (
     <div className="flex flex-wrap items-baseline gap-x-3 border-b border-line px-3 py-1.5" data-testid="viz-node">
       <span className="font-semibold">{node.title}</span>
@@ -86,6 +105,23 @@ function NodeLine({ node, state }: { node: PlanNode | null; state: PlaybackState
         rows: {integer.format(state.nodeRows.get(node.id) ?? 0)} so far / est. {integer.format(node.estimatedRows)}
       </span>
     </div>
+  )
+}
+
+/** What the Limit has done so far: rows skipped for its OFFSET, rows passed on against its LIMIT, and whether it stopped. */
+function LimitLine({ limit }: { limit: LimitView }) {
+  const parts: string[] = []
+  if (limit.offset > 0) parts.push(`OFFSET ${integer.format(limit.offset)}: ${integer.format(limit.skipped)} skipped`)
+  parts.push(
+    limit.count === null
+      ? `${integer.format(limit.passed)} passed on`
+      : `LIMIT ${integer.format(limit.count)}: ${integer.format(limit.passed)} passed on`,
+  )
+  if (limit.stopped) parts.push('stopped: it asks for no more rows')
+  return (
+    <p className="border-b border-line px-3 py-1 font-mono text-fg-muted" data-testid="viz-limit">
+      Limit · {parts.join(' · ')}
+    </p>
   )
 }
 
@@ -144,9 +180,11 @@ function BuffersZone({ state, relations }: { state: PlaybackState; relations: Ma
         {slots.map((slot) => {
           const kind = relations.get(slot.page.relation)?.kind ?? 'table'
           const isCurrent = accessed !== null && samePage(slot.page, accessed.page)
-          // A table's visibility map is part of the table: amber, dashed.
+          // A table's visibility map is part of the table: amber, dashed. A page read ahead and never used: dotted.
           const color =
-            kind === 'index' ? 'border-index text-index' : `border-heap text-heap ${slot.page.fork === 'vm' ? 'border-dashed' : ''}`
+            kind === 'index'
+              ? 'border-index text-index'
+              : `border-heap text-heap ${slot.page.fork === 'vm' ? 'border-dashed' : ''} ${slot.ahead ? 'border-dotted' : ''}`
           // Keyed by position too, so the animation plays again on every access to the slot.
           const animation = isCurrent ? (accessed.type === 'buffer.read' ? 'slot-read' : 'slot-hit') : ''
           return (
@@ -155,7 +193,11 @@ function BuffersZone({ state, relations }: { state: PlaybackState; relations: Ma
               className={`rounded border px-1 ${color} ${isCurrent ? 'bg-surface-2' : 'opacity-60'} ${animation}`}
               data-testid="viz-slot"
               data-current={isCurrent ? accessed.type : undefined}
-              title={slot.wasCached ? 'Was already in shared buffers' : 'Read from disk by this query'}
+              data-ahead={slot.ahead ? '' : undefined}
+              title={
+                (slot.wasCached ? 'Was already in shared buffers' : 'Read from disk by this query') +
+                (slot.ahead ? '; asked for ahead of the scan, which stopped before it got there' : '')
+              }
             >
               {shortPageName(slot.page, relations)}
             </li>
@@ -197,9 +239,11 @@ function HeapZone({ state }: { state: PlaybackState }) {
               </span>
             )}
             {heap.visibleRows !== null && (
-              <span className="text-fg-muted">
+              <span className="text-fg-muted" data-testid="viz-heap-counts">
                 {' '}
-                · {integer.format(heap.visibleRows)} visible · {integer.format(heap.matchedRows ?? 0)} matched
+                · {integer.format(heap.visibleRows)} visible
+                {heap.checkedRows !== null && ` · ${integer.format(heap.checkedRows)} checked before the stop`} ·{' '}
+                {integer.format(heap.matchedRows ?? 0)} matched
               </span>
             )}
           </p>
@@ -211,6 +255,49 @@ function HeapZone({ state }: { state: PlaybackState }) {
           </ul>
         </div>
       )}
+    </Zone>
+  )
+}
+
+/**
+ * A Sort (violet, an intermediate result): the rows it holds while it
+ * collects them (in a top-N heapsort, the best kept, with the worst last:
+ * the one a new row has to beat), then the rows it passes on in order.
+ */
+function SortZone({ sort }: { sort: SortView }) {
+  const keys = sort.keys.map(shortKey)
+  let summary: string
+  if (sort.sorted) {
+    summary = `sorted ${integer.format(sort.held)} ${sort.held === 1 ? 'row' : 'rows'} (${sort.method}) · ${integer.format(sort.passed)} of ${integer.format(sort.held)} passed on`
+  } else if (sort.method === 'top-N heapsort') {
+    summary = `top-N heapsort: keeps the best ${integer.format(sort.keeps ?? 0)} · ${integer.format(sort.received)} seen · ${integer.format(sort.dropped)} dropped`
+  } else {
+    summary = `in memory: ${integer.format(sort.held)} ${sort.held === 1 ? 'row' : 'rows'}`
+  }
+  const topN = !sort.sorted && sort.method === 'top-N heapsort'
+  return (
+    <Zone title={`Sort by ${sort.keys.join(', ')}`} testId="viz-sort">
+      <p className="font-mono text-intermediate" data-testid="viz-sort-summary">
+        {summary}
+      </p>
+      <ul className="font-mono" aria-label="Rows in the sort">
+        {!topN && !sort.sorted && sort.received > sort.rows.length && <li className="text-fg-muted">…</li>}
+        {sort.rows.map((row, i) => (
+          <Fragment key={`${row.row.block}/${row.row.offset}`}>
+            {/* The best kept are listed, then the worst: the rows between are left out. */}
+            {topN && i === sort.rows.length - 1 && sort.held > sort.rows.length && <li className="text-fg-muted">…</li>}
+              <li
+              className={row.latest ? 'text-intermediate' : 'text-fg'}
+              data-testid="viz-sort-row"
+              data-latest={row.latest ? '' : undefined}
+            >
+              {row.position !== null && `${integer.format(row.position + 1)}. `}
+              {rowName(row.row)} {row.key.map((value, k) => `${keys[k]} ${value ?? 'NULL'}`).join(', ')}
+              {topN && i === sort.rows.length - 1 && sort.rows.length > 1 && <span className="text-fg-muted"> ← worst kept</span>}
+            </li>
+          </Fragment>
+        ))}
+      </ul>
     </Zone>
   )
 }
@@ -229,6 +316,7 @@ function BitmapLine({ bitmap }: { bitmap: BitmapView }) {
 
 const OUTCOMES: Record<HeapRow['outcome'], { mark: string; text: string; color: string }> = {
   passed: { mark: '✓', text: 'passes', color: 'text-fg' },
+  up: { mark: '✓', text: '→', color: 'text-fg' },
   emitted: { mark: '✓', text: '→ result', color: 'text-result' },
   rejected: { mark: '✗', text: 'filtered out', color: 'text-rejected' },
   invisible: { mark: '·', text: 'not visible', color: 'text-fg-muted' },
@@ -240,6 +328,7 @@ function HeapRowItem({ row }: { row: HeapRow }) {
     <li className={outcome.color} data-testid="viz-heap-row" data-outcome={row.outcome}>
       {outcome.mark} {rowName(row.row)}
       {row.visible && ` → ${rowName(row.visible)}`} {outcome.text}
+      {row.to !== null && ` ${row.to}`}
       {row.resultIndex !== null && ` row ${integer.format(row.resultIndex + 1)}`}
     </li>
   )
@@ -286,6 +375,7 @@ function MiniMap({ pages, marks, current }: { pages: number; marks: Map<number, 
 }
 
 const MARK_FILLS: Record<PageMark, string> = {
+  ahead: 'bg-heap/40',
   touched: 'bg-heap',
   result: 'bg-result',
   fromIndex: 'bg-index',
@@ -293,7 +383,7 @@ const MARK_FILLS: Record<PageMark, string> = {
 }
 
 /** Which mark a square for several pages shows: the last of theirs in this list. */
-const MARK_RANK: PageMark[] = ['bitmap', 'fromIndex', 'touched', 'result']
+const MARK_RANK: PageMark[] = ['ahead', 'bitmap', 'fromIndex', 'touched', 'result']
 
 /** The page the last step asked for or went through, if any. */
 function currentPage(state: PlaybackState): PageRef | null {

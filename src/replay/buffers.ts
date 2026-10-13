@@ -22,6 +22,11 @@ export class SharedBuffers {
     }
   }
 
+  /** Whether a page is in buffers now, without accessing it. */
+  has(page: PageRef): boolean {
+    return this.cached.has(key(page))
+  }
+
   /** Records an access to a page and returns what it was: a hit, or a read into a buffer. */
   access(page: PageRef): 'buffer.hit' | 'buffer.read' {
     if (this.cached.has(key(page))) return 'buffer.hit'
