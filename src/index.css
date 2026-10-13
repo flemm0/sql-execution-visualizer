@@ -105,11 +105,35 @@
   .icon-btn {
     @apply grid size-7 place-items-center rounded-md text-fg-muted hover:bg-surface-2 hover:text-fg disabled:opacity-40;
   }
+
+  /*
+   * A Postgres term with a glossary definition (src/glossary/Term.tsx): a
+   * dotted underline in a neutral color, because the accent colors are
+   * reserved for their meanings. The text keeps its surrounding color.
+   */
+  .term {
+    @apply cursor-help rounded-sm underline decoration-fg-muted decoration-dotted underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-fg;
+  }
+
+  /* The definition: a popover in the top layer, placed next to its term by Term.tsx. */
+  .term-tooltip {
+    @apply fixed inset-auto m-0 max-w-xs rounded-md border border-line-strong bg-surface-2 px-2.5 py-1.5 font-sans text-xs leading-snug font-normal tracking-normal text-fg normal-case shadow-lg;
+  }
+
+  .term-tooltip:popover-open {
+    animation: term-in 120ms ease-out;
+  }
 }
 
 @keyframes slot-read {
   from {
     transform: translateY(-6px);
+    opacity: 0;
+  }
+}
+
+@keyframes term-in {
+  from {
     opacity: 0;
   }
 }
@@ -123,7 +147,8 @@
 /* With the operating system's "reduce motion" setting on, nothing moves (docs/UX.md#defaults). */
 @media (prefers-reduced-motion: reduce) {
   .slot-read,
-  .slot-hit {
+  .slot-hit,
+  .term-tooltip:popover-open {
     animation: none;
   }
 }

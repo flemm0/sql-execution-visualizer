@@ -1,3 +1,5 @@
+import type { GlossaryTerm } from '../glossary/glossary'
+import { Term } from '../glossary/Term'
 import type { Replay } from '../replay/replay'
 
 const integer = new Intl.NumberFormat('en-US')
@@ -52,7 +54,7 @@ export function ReplayStatus({ replay }: { replay: Replay }) {
               data-check={check.label}
             >
               <td className="pr-3">
-                {check.ok ? '✓' : '✗'} {check.label}
+                {check.ok ? '✓' : '✗'} <CheckLabel label={check.label} />
               </td>
               <td className="pr-3 text-right">{integer.format(check.postgres)}</td>
               <td className="pr-3 text-right">{integer.format(check.replay)}</td>
@@ -66,5 +68,29 @@ export function ReplayStatus({ replay }: { replay: Replay }) {
         </p>
       ))}
     </details>
+  )
+}
+
+/** What a check compares, after its plan node's heading (validate.ts), and the term for it. */
+const CHECK_TERMS: Record<string, GlossaryTerm> = {
+  'rows removed by filter': 'Rows Removed by Filter',
+  'index searches': 'Index Searches',
+  'heap fetches': 'Heap Fetches',
+  'exact heap blocks': 'Exact Heap Blocks',
+  'buffer hits': 'buffer hit',
+  'buffer reads': 'buffer read',
+}
+
+/** A check's label, e.g. "Seq Scan on orders: buffer reads", with what it compares marked as a term. */
+function CheckLabel({ label }: { label: string }) {
+  const split = label.lastIndexOf(': ')
+  const what = label.slice(split + 2)
+  const term = split === -1 ? undefined : CHECK_TERMS[what]
+  if (term === undefined) return <>{label}</>
+  return (
+    <>
+      {label.slice(0, split + 2)}
+      <Term term={term}>{what}</Term>
+    </>
   )
 }
