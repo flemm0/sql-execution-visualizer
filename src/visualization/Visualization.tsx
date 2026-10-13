@@ -17,6 +17,7 @@ import {
 import type { Player } from '../player/usePlayer'
 import { MAX_TRACED_ROWS, type HeapPageContents, type PageRef, type RowRef, type Trace, type TraceRelation } from '../replay/trace'
 import { allNodes, type Validation } from '../replay/validate'
+import { NodeTitle, Term } from '../glossary/Term'
 import { BtreeView } from './BtreeView'
 import { LinePointerText, PageHeaderText, VisibilityText } from './Internals'
 import { PlayerControls } from './PlayerControls'
@@ -102,10 +103,13 @@ function NodeLine({ node, state }: { node: PlanNode | null; state: PlaybackState
         : 'done'
   return (
     <div className="flex flex-wrap items-baseline gap-x-3 border-b border-line px-3 py-1.5" data-testid="viz-node">
-      <span className="font-semibold">{node.title}</span>
+      <span className="font-semibold">
+        <NodeTitle title={node.title} nodeType={node.nodeType} />
+      </span>
       <span className="text-fg-muted">{status}</span>
       <span className="font-mono text-fg-muted" data-testid="viz-rows">
-        rows: {integer.format(state.nodeRows.get(node.id) ?? 0)} so far / est. {integer.format(node.estimatedRows)}
+        rows: {integer.format(state.nodeRows.get(node.id) ?? 0)} so far / <Term term="estimated rows">est.</Term>{' '}
+        {integer.format(node.estimatedRows)}
       </span>
     </div>
   )
@@ -128,7 +132,20 @@ function LimitLine({ limit }: { limit: LimitView }) {
   )
 }
 
-function Zone({ title, testId, wide = false, children }: { title: string; testId: string; wide?: boolean; children: ReactNode }) {
+function Zone({
+  title,
+  heading = title,
+  testId,
+  wide = false,
+  children,
+}: {
+  title: string
+  /** The heading as shown, with its terms marked; `title` (its plain text) names the zone for screen readers. */
+  heading?: ReactNode
+  testId: string
+  wide?: boolean
+  children: ReactNode
+}) {
   return (
     // Each zone scrolls on its own when the pane is short.
     <section
@@ -136,7 +153,7 @@ function Zone({ title, testId, wide = false, children }: { title: string; testId
       data-testid={testId}
       aria-label={title}
     >
-      <h3 className="text-[11px] tracking-wide text-fg-muted uppercase">{title}</h3>
+      <h3 className="text-[11px] tracking-wide text-fg-muted uppercase">{heading}</h3>
       {children}
     </section>
   )
@@ -155,11 +172,30 @@ function IndexZone({ view, state, trace, internals }: { view: IndexView; state: 
   )
   const currentEntry = state.current?.type === 'index.entry' ? state.current.offset : null
   return (
-    <Zone title={`Index ${view.index.name}`} testId="viz-index" wide>
+    <Zone
+      title={`Index ${view.index.name}`}
+      heading={
+        <>
+          <Term term="index">Index</Term> {view.index.name}
+        </>
+      }
+      testId="viz-index"
+      wide
+    >
       <p className="font-mono text-fg-muted">
-        search {integer.format(view.searches)}
-        {view.leaf && ` · ${integer.format(view.entryCount)} matched on idx p${view.leaf.block}`}
-        {view.markedDead > 0 && ` · ${integer.format(view.markedDead)} marked dead`}
+        <Term term="index search">search</Term> {integer.format(view.searches)}
+        {view.leaf && (
+          <>
+            {' '}
+            · {integer.format(view.entryCount)} matched on <Term term="leaf">leaf</Term> idx p{view.leaf.block}
+          </>
+        )}
+        {view.markedDead > 0 && (
+          <>
+            {' '}
+            · {integer.format(view.markedDead)} <Term term="dead entry">marked dead</Term>
+          </>
+        )}
       </p>
       <BtreeView
         view={view}
@@ -181,10 +217,15 @@ function BuffersZone({ state, relations }: { state: PlaybackState; relations: Ma
   const slots = state.buffers.slice(hidden)
   const cached = state.buffers.filter((slot) => slot.wasCached).length
   return (
-    <Zone title="Shared buffers" testId="viz-buffers">
+    <Zone title="Shared buffers" heading={<Term term="shared buffers">Shared buffers</Term>} testId="viz-buffers">
       <p className="font-mono">
-        <span data-testid="viz-hits">hits {integer.format(state.hits)}</span> ·{' '}
-        <span data-testid="viz-reads">reads {integer.format(state.reads)}</span>
+        <span data-testid="viz-hits">
+          <Term term="buffer hit">hits</Term> {integer.format(state.hits)}
+        </span>{' '}
+        ·{' '}
+        <span data-testid="viz-reads">
+          <Term term="buffer read">reads</Term> {integer.format(state.reads)}
+        </span>
       </p>
       <ul className="flex flex-wrap gap-1 font-mono" aria-label="Pages this query used">
         {slots.map((slot) => {
@@ -230,8 +271,17 @@ function HeapZone({ state, trace, internals }: { state: PlaybackState; trace: Tr
   if (table === null) return null
   const heap = state.heap
   const page = heap ? (contents.get(`${heap.page.relation}/${heap.page.block}`) ?? null) : null
+  const pageCount = `${integer.format(table.pages)} ${table.pages === 1 ? 'page' : 'pages'}`
   return (
-    <Zone title={`Heap ${table.name} (${integer.format(table.pages)} ${table.pages === 1 ? 'page' : 'pages'})`} testId="viz-heap">
+    <Zone
+      title={`Heap ${table.name} (${pageCount})`}
+      heading={
+        <>
+          <Term term="heap">Heap</Term> {table.name} ({pageCount})
+        </>
+      }
+      testId="viz-heap"
+    >
       {state.bitmap && <BitmapLine bitmap={state.bitmap} />}
       <MiniMap pages={table.pages} marks={state.pageMarks} current={heap?.page.relation === table.id ? heap.page.block : null} />
       {heap && (
@@ -247,13 +297,22 @@ function HeapZone({ state, trace, internals }: { state: PlaybackState; trace: Tr
             {heap.allVisible !== null && (
               <span className="text-fg-muted" data-testid="viz-all-visible">
                 {' '}
-                · {heap.allVisible ? 'all-visible: not read, rows from the index' : 'not all-visible: rows fetched'}
+                ·{' '}
+                {heap.allVisible ? (
+                  <>
+                    <Term term="all-visible" />: not read, rows from the index
+                  </>
+                ) : (
+                  <>
+                    not <Term term="all-visible" />: rows fetched
+                  </>
+                )}
               </span>
             )}
             {heap.visibleRows !== null && (
               <span className="text-fg-muted" data-testid="viz-heap-counts">
                 {' '}
-                · {integer.format(heap.visibleRows)} visible
+                · {integer.format(heap.visibleRows)} <Term term="visible" />
                 {heap.checkedRows !== null && ` · ${integer.format(heap.checkedRows)} checked before the stop`} ·{' '}
                 {integer.format(heap.matchedRows ?? 0)} matched
               </span>
@@ -320,7 +379,7 @@ function BitmapLine({ bitmap }: { bitmap: BitmapView }) {
   const pages = bitmap.pages.size
   return (
     <p className="font-mono text-intermediate" data-testid="viz-bitmap">
-      bitmap: {integer.format(bitmap.rows)} {bitmap.rows === 1 ? 'row' : 'rows'} on {integer.format(pages)}{' '}
+      <Term term="bitmap" />: {integer.format(bitmap.rows)} {bitmap.rows === 1 ? 'row' : 'rows'} on {integer.format(pages)}{' '}
       {pages === 1 ? 'page' : 'pages'}
       {bitmap.pagesRead > 0 && ` · ${integer.format(bitmap.pagesRead)} of ${integer.format(pages)} read`}
     </p>

@@ -113,7 +113,7 @@ interface JsonExplain {
 }
 
 /** Fields shown under a node, in this order, when Postgres includes them. */
-const DETAIL_FIELDS = [
+export const DETAIL_FIELDS = [
   'Index Cond',
   'Recheck Cond',
   'Hash Cond',
