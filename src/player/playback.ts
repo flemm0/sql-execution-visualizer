@@ -13,7 +13,8 @@ import {
 /*
  * What the visualization shows at a point in the trace: the state after the
  * first `position` events have happened, and a caption for the last one.
- * One step of the player is one trace event (docs/UX.md#playback).
+ * A player step is one event, or for a long trace, a stretch of several
+ * (condense.ts); either way the position here counts events.
  *
  * The state is rebuilt from the start of the trace for every position, which
  * makes stepping back and scrubbing as simple as stepping forward. A trace

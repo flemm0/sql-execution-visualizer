@@ -3,6 +3,16 @@ import { commandName, splitStatements } from '../src/db/statements'
 import { EXAMPLES, count, type ExampleStep } from '../src/examples'
 import { editorContent, openApp, waitForRunToFinish } from './editor'
 
+/** The ~30 s budget at the default 30 steps a second (ADR 0005): the most steps an animation may have. */
+const STEP_BUDGET = 900
+
+/** Checks the animation the page loaded plays within the budget: its condensed step count, as the player exposes it. */
+async function expectWithinBudget(page: Page) {
+  const steps = Number(await page.getByTestId('player').getAttribute('data-steps'))
+  expect(steps).toBeGreaterThan(0)
+  expect(steps).toBeLessThanOrEqual(STEP_BUDGET)
+}
+
 /*
  * The milestones' exit criteria (docs/ROADMAP.md), as a visitor sees them.
  * CI runs this against the local build on every PR, and the Live check
@@ -11,8 +21,7 @@ import { editorContent, openApp, waitForRunToFinish } from './editor'
  * Each example is picked from the Examples menu and run the way its editor
  * text says: one statement at a time, top to bottom. Every query must replay
  * with "✓ Replay matches Postgres", get the plan the example describes
- * (src/examples.ts), and animate to its last step. M3's ~30 s budget is
- * checked once condensing lands.
+ * (src/examples.ts), and animate to its last step within M3's ~30 s budget.
  */
 
 /** M2's exit criteria: these examples were the first to animate end to end. */
@@ -68,6 +77,7 @@ for (const example of EXAMPLES) {
 
       await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres')
       await expect(page.getByTestId('viz-mismatch')).toHaveCount(0)
+      await expectWithinBudget(page)
       await page.getByTestId('player').getByRole('button', { name: 'To the end', exact: true }).click()
       const rows = count(step.expect.rows, 'row')
       await expect(page.getByTestId('viz-caption')).toHaveText(`${step.expect.plan[0]} has no more rows: it sent ${rows} to the result.`)

@@ -15,6 +15,7 @@ import { Term } from './glossary/Term'
 import { APP_NAME, Header } from './layout/Header'
 import { Workspace } from './layout/Workspace'
 import { PlanTree } from './plan/PlanTree'
+import { condense } from './player/condense'
 import { nodeProgressAt, resultRowsAt } from './player/playback'
 import { usePlayer } from './player/usePlayer'
 import { ResultsPane, type Filling } from './results/ResultsPane'
@@ -135,7 +136,8 @@ export default function App() {
       const results = mode === 'all' ? await runAll(db, sql, options) : await runStatementAt(db, sql, cursor, options)
       setRun({ status: 'done', results, sql, id: nextRunId.current++ })
       const replay = lastQueryOf(results)?.replay
-      player.load(replay?.status === 'replayed' ? replay.trace.events.length : 0)
+      // Long traces play in condensed steps, to fit the ~30 s budget (ADR 0042).
+      player.load(replay?.status === 'replayed' ? condense(replay.trace) : [])
       // A query to animate takes the visualization pane back; otherwise an open page stays, and is read again.
       if (replay?.status === 'replayed') setPageTarget(null)
       setTidyingUp(true)
@@ -232,9 +234,9 @@ export default function App() {
   // While the animation plays, the query's result fills in as rows are emitted;
   // at the last step it's whole (even if the replay sent fewer rows than Postgres did).
   const filling: Filling | null =
-    lastQuery && trace && player.position < player.steps ? { result: lastQuery, rows: resultRowsAt(trace, player.position) } : null
+    lastQuery && trace && player.position < player.steps ? { result: lastQuery, rows: resultRowsAt(trace, player.events) } : null
   // Likewise the plan tree highlights the node working now and counts each node's rows so far.
-  const progress = trace && player.position < player.steps ? nodeProgressAt(trace, player.position) : null
+  const progress = trace && player.position < player.steps ? nodeProgressAt(trace, player.events) : null
 
   return (
     <div className="flex h-screen flex-col">
