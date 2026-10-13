@@ -64,6 +64,39 @@ const M3_EXAMPLES = [
     rows: '944 rows',
   },
   {
+    name: 'example 7: lower(email) hides the column from its index, a Seq Scan',
+    sql: `SELECT * FROM customers WHERE lower(email) = 'angela.hawkins42@example.com';`,
+    node: 'Seq Scan on customers',
+    rows: '1 row',
+  },
+  {
+    // Until ANALYZE, Postgres has no statistics on lower(email) and guesses 50 rows.
+    name: 'example 7: with an index on lower(email), a bitmap scan',
+    setup: 'CREATE INDEX ON customers (lower(email));',
+    sql: `SELECT * FROM customers WHERE lower(email) = 'angela.hawkins42@example.com';`,
+    node: 'Bitmap Heap Scan on customers',
+    rows: '1 row',
+  },
+  {
+    name: 'example 7: with an index on lower(email) and its statistics, an Index Scan',
+    setup: 'CREATE INDEX ON customers (lower(email)); ANALYZE customers;',
+    sql: `SELECT * FROM customers WHERE lower(email) = 'angela.hawkins42@example.com';`,
+    node: 'Index Scan using customers_lower_idx on customers',
+    rows: '1 row',
+  },
+  {
+    name: 'example 8: the index’s leading column, a bitmap scan',
+    sql: `SELECT * FROM customers WHERE last_name = 'Hawkins';`,
+    node: 'Bitmap Heap Scan on customers',
+    rows: '38 rows',
+  },
+  {
+    name: 'example 8: the index’s second column, a Seq Scan',
+    sql: `SELECT * FROM customers WHERE first_name = 'Angela';`,
+    node: 'Seq Scan on customers',
+    rows: '41 rows',
+  },
+  {
     name: 'example 9: an index-only scan',
     sql: 'SELECT order_date FROM orders WHERE customer_id = 42;',
     node: 'Index Only Scan using orders_customer_id_order_date_idx on orders',

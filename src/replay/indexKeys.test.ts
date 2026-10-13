@@ -6,7 +6,7 @@ import { readKey } from './indexKeys'
 import { Unsupported } from './unsupported'
 
 function column(type: string): IndexColumn {
-  return { name: 'c', type, isKey: true, collation: null, descending: false, nullsFirst: false, defaultOrder: true }
+  return { name: 'c', expression: null, type, isKey: true, collation: null, descending: false, nullsFirst: false, defaultOrder: true }
 }
 
 describe('readKey', () => {

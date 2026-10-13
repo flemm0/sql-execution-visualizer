@@ -3,7 +3,7 @@ import type { IndexColumn } from '../db/inspector'
 import { parseIndexCond } from './indexScan'
 
 function column(name: string | null, type = 'int4', options: Partial<IndexColumn> = {}): IndexColumn {
-  return { name, type, isKey: true, collation: null, descending: false, nullsFirst: false, defaultOrder: true, ...options }
+  return { name, expression: null, type, isKey: true, collation: null, descending: false, nullsFirst: false, defaultOrder: true, ...options }
 }
 
 const orderColumns = [column('customer_id'), column('order_date', 'date')]
@@ -63,6 +63,22 @@ describe('parseIndexCond', () => {
     ])
   })
 
+  it('reads a condition on an expression index’s column, written with the alias the index’s definition leaves off', () => {
+    const lowerEmail = [column(null, 'text', { expression: 'lower(email)' })]
+    expect(parseIndexCond(`(lower(c.email) = 'ann@example.com'::text)`, 'c', lowerEmail)).toEqual([
+      { column: 0, operator: '=', value: `'ann@example.com'::text` },
+    ])
+    // Expressions that aren't function calls get their own parentheses in the definition;
+    // the alias is only taken off column names, not out of string literals.
+    const columns = [column(null, 'text', { expression: `((country || 'c.x'::text))` }), column(null, 'text', { expression: 'lower((code)::text)' })]
+    expect(parseIndexCond(`(((c.country || 'c.x'::text) = 'USc.x'::text) AND (lower((c.code)::text) > 'a'::text))`, 'c', columns)).toEqual([
+      { column: 0, operator: '=', value: `'USc.x'::text` },
+      { column: 1, operator: '>', value: `'a'::text` },
+    ])
+    // Another table's column isn't this one's.
+    expect(() => parseIndexCond(`(lower(d.email) = 'a'::text)`, 'c', lowerEmail)).toThrow('index condition')
+  })
+
   it('says what it can’t replay yet', () => {
     const reason = (cond: string, columns = [column('id')]) => {
       try {
@@ -82,8 +98,9 @@ describe('parseIndexCond', () => {
     expect(reason(`((t.id > 5) AND (t.id > 7))`)).toBe(
       'Animation isn’t available yet for several conditions of the same kind on one index column.',
     )
-    expect(reason(`(lower(t.email) = 'a'::text)`, [column(null, 'text')])).toBe(
-      'Animation isn’t available yet for index conditions on expressions.',
+    // An expression the index doesn't hold.
+    expect(reason(`(upper(t.email) = 'A'::text)`, [column(null, 'text', { expression: 'lower(email)' })])).toBe(
+      `Animation isn’t available yet for the index condition upper(t.email) = 'A'::text.`,
     )
     expect(reason(`(t.id IS NULL)`)).toBe('Animation isn’t available yet for the index condition t.id IS NULL.')
     expect(reason(`(t.id = 1)`, [column('id', 'numeric')])).toBe(

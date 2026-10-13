@@ -677,6 +677,85 @@ describe('example 5: selectivity', () => {
   })
 })
 
+describe('example 7: functions hide columns', () => {
+  // Customer 42's email. The seed writes emails in lower case, so lower(email) is the email.
+  const example7 = `SELECT * FROM customers WHERE lower(email) = 'angela.hawkins42@example.com'`
+
+  /** The keys of the entries the index scan matched, and the rows they point at. */
+  function matched(trace: Trace) {
+    return ofType(trace, 'index.entry').map((event) => ({ key: event.key, row: event.row }))
+  }
+
+  it('without an index on lower(email), a Seq Scan: the unique index on email can’t be used', async () => {
+    const { result, trace } = await replayed(example7)
+    expect(result.plan?.root.title).toBe('Seq Scan on customers')
+    expect(result.totalRows).toBe(1)
+    expect(ofType(trace, 'buffer.read')).toHaveLength(126)
+  })
+
+  it('with an expression index, its keys are lower(email); a bitmap scan until ANALYZE, then an Index Scan', async () => {
+    await db.exec('CREATE INDEX customers_lower_idx ON customers (lower(email))')
+    try {
+      const customer = await db.query<{ ctid: string }>('SELECT ctid::text FROM customers WHERE id = 42')
+      const row = customer.rows[0].ctid
+
+      // No statistics on lower(email) yet: Postgres guesses 50 rows, and picks a bitmap scan.
+      const bitmap = await replayed(example7)
+      expect(bitmap.result.plan?.root.title).toBe('Bitmap Heap Scan on customers')
+      expect(bitmap.result.plan?.root.children[0].title).toBe('Bitmap Index Scan on customers_lower_idx')
+      expect(bitmap.result.totalRows).toBe(1)
+      expect(matched(bitmap.trace).map((entry) => [entry.key, text(entry.row)])).toEqual([
+        [['angela.hawkins42@example.com'], row],
+      ])
+
+      // ANALYZE gathers statistics on the index's expression: one row, an Index Scan.
+      await db.exec('ANALYZE customers')
+      const index = await replayed(example7)
+      expect(index.result.plan?.root.title).toBe('Index Scan using customers_lower_idx on customers')
+      expect(index.result.totalRows).toBe(1)
+      expect(matched(index.trace).map((entry) => [entry.key, text(entry.row)])).toEqual([
+        [['angela.hawkins42@example.com'], row],
+      ])
+      // Root, leaf, then the one heap page.
+      expect(ofType(index.trace, 'buffer.read')).toHaveLength(3)
+      // Every key the visualization draws is a lower-case email, as the index stores it.
+      const keys = index.trace.indexPages.flatMap((page) => page.items.flatMap((item) => item.key))
+      expect(keys.length).toBeGreaterThan(100)
+      expect(keys.every((key) => key !== null && key === key.toLowerCase() && key.endsWith('@example.com'))).toBe(true)
+
+      // A value in another case matches nothing: the scan finds no entry.
+      const none = await replayed(`SELECT * FROM customers WHERE lower(email) = 'Angela.Hawkins42@example.com'`)
+      expect(none.result.totalRows).toBe(0)
+      expect(matched(none.trace)).toEqual([])
+    } finally {
+      await db.exec('DROP INDEX customers_lower_idx; ANALYZE customers')
+    }
+  })
+})
+
+describe('example 8: column order in a multi-column index', () => {
+  it('on the leading column (last_name), customers_last_name_first_name_idx finds the rows: a bitmap scan', async () => {
+    const { result, trace } = await replayed(`SELECT * FROM customers WHERE last_name = 'Hawkins'`)
+    expect(result.plan?.root.title).toBe('Bitmap Heap Scan on customers')
+    expect(result.plan?.root.children[0].title).toBe('Bitmap Index Scan on customers_last_name_first_name_idx')
+    expect(result.totalRows).toBe(38)
+    const entries = ofType(trace, 'index.entry')
+    expect(entries).toHaveLength(38)
+    expect(entries.every((event) => event.key[0] === 'Hawkins')).toBe(true)
+    // One search down the index, then 32 heap pages.
+    expect(ofType(trace, 'index.search')).toHaveLength(1)
+    expect(ofType(trace, 'heap.tuple').map((event) => event.row.block).filter((block, i, all) => all.indexOf(block) === i)).toHaveLength(32)
+  })
+
+  it('on the second column (first_name) alone, a Seq Scan: Postgres prefers it to a skip scan', async () => {
+    const { result, trace } = await replayed(`SELECT * FROM customers WHERE first_name = 'Angela'`)
+    expect(result.plan?.root.title).toBe('Seq Scan on customers')
+    expect(result.totalRows).toBe(41)
+    expect(ofType(trace, 'index.search')).toEqual([])
+    expect(ofType(trace, 'buffer.read')).toHaveLength(126)
+  })
+})
+
 describe('a replay that can’t match', () => {
   it('a volatile filter picks other rows each time, and the validator says so', async () => {
     // random() is evaluated anew by EXPLAIN ANALYZE, the query, and the replay's own query.

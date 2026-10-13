@@ -41,7 +41,8 @@ import { Unsupported } from './unsupported'
  * read.
  *
  * What's supported: conditions =, <, <=, >, >= (one value each) and = ANY
- * (a list) on the index's key columns, at most one of each kind per column,
+ * (a list) on the index's key columns (table columns or expressions, such as
+ * lower(email)), at most one of each kind per column,
  * and = or = ANY alone. Backward scans aren't replayed yet; walkIndexScan
  * says so.
  */
@@ -194,12 +195,55 @@ function parseCondition(condition: string, alias: string, keyColumns: IndexColum
   // A varchar column is compared as text: "(t.code)::text".
   const cast = /^\((.*)\)::text$/.exec(left)
   const match = QUALIFIED_NAME.exec(cast === null ? left : cast[1])
-  const column =
+  let column =
     match && unquote(match[1]) === alias
       ? keyColumns.findIndex((key) => key.name === unquote(match[2]) && (cast === null || key.type === 'varchar'))
       : -1
-  if (column === -1) throw new Unsupported('Animation isn’t available yet for index conditions on expressions.')
+  // An expression index's column: "lower(c.email)" is the index's lower(email).
+  if (column === -1) {
+    const expression = unwrapAll(unqualify(left, alias))
+    column = keyColumns.findIndex((key) => key.expression !== null && unwrapAll(key.expression) === expression)
+  }
+  if (column === -1) throw new Unsupported(`Animation isn’t available yet for the index condition ${condition}.`)
   return { column, operator, value }
+}
+
+/**
+ * An expression with the table's alias taken off its column names, as the
+ * index's definition writes them: "lower(c.email)" with alias c gives
+ * "lower(email)". String literals are left as they are.
+ */
+function unqualify(expression: string, alias: string): string {
+  const qualifier = new RegExp(`^(${NAME})\\.(?=${NAME})`)
+  let out = ''
+  let i = 0
+  while (i < expression.length) {
+    const char = expression[i]
+    if (char === "'") {
+      // Copy the string literal whole; a doubled quote inside it closes and reopens.
+      const end = expression.indexOf("'", i + 1)
+      const to = end === -1 ? expression.length : end + 1
+      out += expression.slice(i, to)
+      i = to
+      continue
+    }
+    // A name starts here if the character before can't be part of one.
+    const startsName = i === 0 || /[\s(,:]/.test(expression[i - 1])
+    const found = startsName ? qualifier.exec(expression.slice(i)) : null
+    if (found !== null && unquote(found[1]) === alias) {
+      i += found[0].length
+      continue
+    }
+    out += char
+    i++
+  }
+  return out
+}
+
+/** An expression without any parentheses enclosing all of it: "((a || 'x'))" gives "a || 'x'". */
+function unwrapAll(expression: string): string {
+  const inner = unwrap(expression)
+  return inner === expression ? expression : unwrapAll(inner)
 }
 
 /** A name as Postgres writes it, e.g. orders or "Bin No", and a qualified one: orders.id. */

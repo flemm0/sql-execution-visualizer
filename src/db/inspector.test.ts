@@ -287,13 +287,13 @@ describe('readIndexColumns', () => {
       CREATE INDEX people_idx ON people (name COLLATE "C" DESC, lower(email) text_pattern_ops, born NULLS FIRST) INCLUDE (id);
     `)
     expect(await readIndexColumns(db, await relation('people_idx'))).toEqual([
-      { name: 'name', type: 'text', isKey: true, collation: '"C"', descending: true, nullsFirst: true, defaultOrder: true },
-      { name: null, type: 'text', isKey: true, collation: '"default"', descending: false, nullsFirst: false, defaultOrder: false },
-      { name: 'born', type: 'date', isKey: true, collation: null, descending: false, nullsFirst: true, defaultOrder: true },
-      { name: 'id', type: 'int4', isKey: false, collation: null, descending: false, nullsFirst: false, defaultOrder: true },
+      { name: 'name', expression: null, type: 'text', isKey: true, collation: '"C"', descending: true, nullsFirst: true, defaultOrder: true },
+      { name: null, expression: 'lower(email)', type: 'text', isKey: true, collation: '"default"', descending: false, nullsFirst: false, defaultOrder: false },
+      { name: 'born', expression: null, type: 'date', isKey: true, collation: null, descending: false, nullsFirst: true, defaultOrder: true },
+      { name: 'id', expression: null, type: 'int4', isKey: false, collation: null, descending: false, nullsFirst: false, defaultOrder: true },
     ])
     expect(await readIndexColumns(db, await relation('orders_pkey'))).toEqual([
-      { name: 'id', type: 'int4', isKey: true, collation: null, descending: false, nullsFirst: false, defaultOrder: true },
+      { name: 'id', expression: null, type: 'int4', isKey: true, collation: null, descending: false, nullsFirst: false, defaultOrder: true },
     ])
   })
 })
