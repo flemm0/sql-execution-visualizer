@@ -4,10 +4,11 @@ import { query } from '../db/query'
 import { readKey } from './indexKeys'
 import type { IndexPageContents } from './trace'
 import { canStep, KeyComparisons, nextValue, previousValue } from './keyComparisons'
+import { Unsupported } from './unsupported'
 
 /*
- * Walks a B-tree as a forward index scan does in Postgres 18, and records
- * every page it reads and every entry it returns. A port of the parts of
+ * Walks a B-tree as an index scan does in Postgres 18, forward or backward,
+ * and records every page it reads and every entry it returns. A port of the parts of
  * nbtree that decide this (nbtsearch.c, nbtutils.c, nbtpreprocesskeys.c);
  * each function names the one it follows, and keeps its structure, so the two
  * can be read side by side. What's left out changes how fast Postgres runs,
@@ -22,6 +23,12 @@ import { canStep, KeyComparisons, nextValue, previousValue } from './keyComparis
  * Each time the scan's arrays move on, the scan either keeps reading leaf
  * pages to the right, or searches down from the root again (another
  * "primitive" index scan, counted in EXPLAIN's Index Searches).
+ *
+ * A backward scan (ORDER BY ... DESC on an ascending index) searches down
+ * for the last entry that can match, then reads entries from there right to
+ * left, moving to the page on the left while entries can still match. Only
+ * scans without arrays run backward here: a backward scan with a list or a
+ * skip scan is reported as not available yet.
  *
  * Every comparison is made by Postgres (keyComparisons.ts).
  */
@@ -139,19 +146,25 @@ export interface BtreeWalk {
 }
 
 /**
- * Walks an index as a forward scan with these conditions does, reading each
- * page it reaches. `keys` are sorted by column, lower bounds first.
+ * Walks an index as a scan with these conditions does, reading each page it
+ * reaches. `keys` are sorted by column, lower bounds first. `backward` for a
+ * scan from high keys to low. Throws Unsupported for a backward scan with
+ * arrays.
  */
 export async function walkBtree(
   db: PGliteInterface,
   index: Relation,
   columns: IndexColumn[],
   keys: ScanKey[],
+  backward = false,
 ): Promise<BtreeWalk> {
   const keyColumns = columns.filter((column) => column.isKey)
   const preprocessed = await preprocessKeys(db, keyColumns, keys)
   if (preprocessed === null) return { steps: [], skipScan: false, pages: [] }
-  const scan = new BtreeScan(db, index, columns, preprocessed)
+  if (backward && preprocessed.some((key) => key.array !== null)) {
+    throw new Unsupported('Animation isn’t available yet for backward index scans of a list of values or a skip scan.')
+  }
+  const scan = new BtreeScan(db, index, columns, preprocessed, backward)
   await scan.run()
   return {
     steps: scan.steps,
@@ -248,7 +261,7 @@ function quote(text: string) {
   return `'${text.replaceAll("'", "''")}'`
 }
 
-/** One forward scan through a B-tree, with its scan keys' state (BTScanOpaque). */
+/** One scan through a B-tree, with its scan keys' state (BTScanOpaque). */
 class BtreeScan {
   steps: IndexStep[] = []
   /** The pages read so far, with their keys as text, by block. */
@@ -261,18 +274,22 @@ class BtreeScan {
   private scanBehind = false
   private oppositeDirCheck = false
   private moreRight = true
+  /** Whether a backward scan goes on to the page on the left (so->currPos.moreLeft). */
+  private moreLeft = true
   private fastRoot: number | null = null
 
   private db: PGliteInterface
   private index: Relation
   private columns: IndexColumn[]
   private keys: Key[]
+  private backward: boolean
 
-  constructor(db: PGliteInterface, index: Relation, columns: IndexColumn[], keys: Key[]) {
+  constructor(db: PGliteInterface, index: Relation, columns: IndexColumn[], keys: Key[], backward: boolean) {
     this.db = db
     this.index = index
     this.columns = columns
     this.keys = keys
+    this.backward = backward
     this.keyColumns = columns.filter((column) => column.isKey)
     this.arrays = keys.filter((key) => key.array !== null)
     const constants = this.keyColumns.map((_, column) => {
@@ -297,6 +314,8 @@ class BtreeScan {
 
   /** The whole scan (btgettuple): one primitive scan, then another for as long as one is scheduled. */
   async run() {
+    // A backward scan has no arrays, so it's one primitive scan.
+    if (this.backward) return this.firstBackward()
     do {
       await this.first()
     } while (this.arrays.length > 0 && this.needPrimScan)
@@ -341,6 +360,83 @@ class BtreeScan {
       if (!page.page.isIgnored) await this.readPage(page, firstData(page.page), false)
       next = page.page.next
     }
+  }
+
+  /**
+   * A backward primitive index scan (_bt_first): search down to the leaf
+   * holding the last entry that can match, then read leaves to the left.
+   * Without a search key, down the right edge of the tree (_bt_endpoint).
+   */
+  private async firstBackward() {
+    this.steps.push({ kind: 'search' })
+
+    const { search, nextKey } = this.searchKeyBackward()
+    let current = await this.read(await this.root(), search)
+    // Down to a leaf (_bt_search), or along the right edge without a search key (_bt_get_endpoint).
+    for (;;) {
+      const { page } = current
+      // A page that split after its parent was read, or was deleted, or isn't the rightmost on the right edge: move right.
+      const moveRight =
+        page.next !== null &&
+        (page.isIgnored || search.length === 0 || (await this.compareSearch(current.items[0], search)) >= (nextKey ? 0 : 1))
+      if (moveRight) {
+        this.steps.push({ kind: 'visit', page, downlink: null })
+        current = await this.read(page.next as number, search)
+        continue
+      }
+      if (page.isLeaf) break
+      const position = search.length === 0 ? page.items.length - 1 : (await this.binsrch(current, search, nextKey)) - 1
+      const downlink = current.items[position].item
+      this.steps.push({ kind: 'visit', page, downlink: downlink.offset })
+      current = await this.read(downlink.childBlock as number, search)
+    }
+    this.steps.push({ kind: 'visit', page: current.page, downlink: null })
+    // The last entry before the first one the search key sorts before (or, for <, isn't after).
+    const offnum = search.length === 0 ? current.items.length - 1 : (await this.binsrch(current, search, nextKey)) - 1
+
+    // _bt_readfirstpage, then _bt_steppage and _bt_readnextpage to the left for as long as there can be more.
+    this.moreLeft = true
+    await this.readPageBackward(current, offnum)
+    let last = current.page.block
+    let prev = current.page.prev
+    while (prev !== null && this.moreLeft) {
+      const page = await this.read(prev, [])
+      // The left neighbor links back to the page the scan came from (_bt_lock_and_validate_left).
+      if (page.page.next !== last) throw new Error(`Index page ${prev} doesn’t link back to page ${last}.`)
+      this.steps.push({ kind: 'visit', page: page.page, downlink: null })
+      if (!page.page.isIgnored) await this.readPageBackward(page, page.items.length - 1)
+      last = page.page.block
+      prev = page.page.prev
+    }
+  }
+
+  /**
+   * The search key for a backward primitive scan (the startKeys loop of
+   * _bt_first): the = conditions on leading columns, then one <= or <
+   * condition. A column with only a lower bound (> or >=) can't hold a NULL
+   * that matches, and NULLs sort last, so it starts the search before the
+   * NULLs ("< NULL").
+   */
+  private searchKeyBackward(): { search: SearchValue[]; nextKey: boolean } {
+    const search: SearchValue[] = []
+    let strategy: Strategy = '='
+    for (let column = 0; ; column++) {
+      const own = this.keys.filter((key) => key.column === column)
+      const key = own.find((each) => each.strategy === '=' || each.strategy === '<=' || each.strategy === '<')
+      if (key === undefined) {
+        if (own.some((each) => each.strategy === '>' || each.strategy === '>=')) {
+          search.push({ kind: 'null' })
+          strategy = '<'
+        }
+        break
+      }
+      search.push({ kind: 'constant', sql: key.constant as string })
+      strategy = key.strategy
+      if (strategy === '<') break
+      if (!this.keys.some((each) => each.column === column + 1)) break
+    }
+    // Backward, = searches like <=: for the last entry equal to the key.
+    return { search, nextKey: strategy !== '<' }
   }
 
   /** Postgres keeps the metapage in memory after planning, so reading it isn't part of the scan. */
@@ -469,8 +565,10 @@ class BtreeScan {
     // A column the item doesn't have stands for "minus infinity": the search key is after it.
     if (search.length > item.columns) return 1
     // Equal to a high key or downlink without a heap row: every entry to its
-    // left is lower, so the search can go right (a forward scan wants no row "minus infinity").
-    if (item.item.role !== 'entry' && search.length === item.columns && !item.item.hasHeapTid) return 1
+    // left is lower, so the search can go right (a forward scan wants no row
+    // "minus infinity"). A backward scan counts it as equal: it wants the
+    // entries to the left too.
+    if (!this.backward && item.item.role !== 'entry' && search.length === item.columns && !item.item.hasHeapTid) return 1
     return 0
   }
 
@@ -546,6 +644,38 @@ class BtreeScan {
     // The high key can tell that the next page has no matches.
     if (pstate.continuescan && !this.scanBehind && !rightmost) await this.checkKeys(pstate, page.items[0])
     if (!pstate.continuescan) this.moreRight = false
+  }
+
+  /**
+   * Reads a leaf page's entries from `offnum` down to the first, right to
+   * left (_bt_readpage, backward), records the ones that match, and decides
+   * whether the scan goes on to the page on the left (moreLeft). A posting
+   * list's rows are returned in ascending order all the same.
+   */
+  private async readPageBackward(page: KeyedPage, offnum: number) {
+    const minoff = firstData(page.page)
+    let i = Math.min(offnum, page.items.length - 1)
+    let continuescan = true
+    while (i >= minoff) {
+      const item = page.items[i]
+      // Entries marked dead are skipped without a look, except the page's
+      // first: its keys can still tell the page on the left has no matches.
+      if (item.item.dead && i > minoff) {
+        i--
+        continue
+      }
+      const result = await this.checkCompare(item, 'backward', 0)
+      continuescan = result.continuescan
+      if (result.passes && !item.item.dead) {
+        const key = item.values.map((value, column) => this.comparisons.text(column, value))
+        for (const tid of item.item.heapTids) {
+          this.steps.push({ kind: 'entry', block: page.page.block, offset: item.item.offset, key, tid })
+        }
+      }
+      if (!continuescan) break
+      i--
+    }
+    if (!continuescan) this.moreLeft = false
   }
 
   /** Whether an item matches the scan keys; also decides whether the scan goes on (_bt_checkkeys). */

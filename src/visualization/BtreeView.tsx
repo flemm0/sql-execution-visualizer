@@ -88,6 +88,7 @@ function Link({ link }: { link: LinkShape }) {
     down: { stroke: 'var(--accent-index)', width: 1.5, dash: undefined, marker: 'url(#btree-arrow-index)' },
     sibling: { stroke: 'var(--border-strong)', width: 1, dash: '3 3', marker: undefined },
     right: { stroke: 'var(--text-secondary)', width: 1, dash: undefined, marker: 'url(#btree-arrow)' },
+    left: { stroke: 'var(--text-secondary)', width: 1, dash: undefined, marker: 'url(#btree-arrow)' },
   }[link.kind]
   return (
     <line

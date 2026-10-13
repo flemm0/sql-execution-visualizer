@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Trace, TraceEvent } from '../replay/trace'
-import { SHOWN_ROWS, formatIndexKey, formatKey, nodeProgressAt, resultRowsAt, stateAt, type NodeInfo } from './playback'
+import { SHOWN_ROWS, formatIndexKey, formatKey, nodeProgressAt, resultRowsAt, shortKey, stateAt, type NodeInfo } from './playback'
 
 const TABLE = 10
 const INDEX = 20
@@ -10,7 +10,7 @@ const relations: Trace['relations'] = [
 ]
 
 function trace(events: TraceEvent[]): Trace {
-  return { relations, events, indexPages: [] }
+  return { relations, events, indexPages: [], sorts: [], limits: [] }
 }
 
 function nodes(info: Partial<NodeInfo> = {}) {
@@ -282,7 +282,7 @@ describe('the state at a step', () => {
       { type: 'visibility.check', node: 0, page: heapPage(119), row: row(119, 59), allVisible: true, matched: false },
     ])
     const state = stateAt(rejected, nodes({ hasFilter: true }), 1)
-    expect(state.heap?.rows).toEqual([{ row: row(119, 59), visible: null, outcome: 'rejected', resultIndex: null }])
+    expect(state.heap?.rows).toEqual([{ row: row(119, 59), visible: null, outcome: 'rejected', resultIndex: null, to: null }])
     expect(state.caption).toBe(
       'The visibility map marks heap page 119 all-visible (every row on it is visible to every transaction), so the entry’s values are enough: row (119,59) isn’t fetched from the heap. Its values fail the filter, so it’s rejected.',
     )
@@ -478,5 +478,239 @@ describe('formatIndexKey', () => {
     // A page's first downlink keeps no key at all.
     expect(formatIndexKey([], 2)).toBe('−∞')
     expect(formatIndexKey([null, 'Mary'], 2)).toBe('(NULL, Mary)')
+  })
+})
+
+/** Plan nodes for a Limit (0) over a Sort (1) over a Seq Scan (2), or a Limit (0) over an index scan (1). */
+function planNodes(entries: [number, string, number?][]) {
+  return new Map<number, NodeInfo>(entries.map(([id, title, parent]) => [id, { title, hasFilter: false, parent }]))
+}
+
+describe('a Limit over a scan', () => {
+  const scanTitle = 'Index Scan Backward using orders_customer_id_order_date_idx on orders'
+  const limitNodes = planNodes([
+    [0, 'Limit'],
+    [1, scanTitle, 0],
+  ])
+  const limited: Trace = {
+    ...trace([
+      { type: 'node.start', node: 0 },
+      { type: 'node.start', node: 1 },
+      { type: 'index.search', node: 1, index: INDEX, backward: true },
+      { type: 'buffer.read', node: 1, page: indexPage(3) },
+      { type: 'index.visit', node: 1, page: indexPage(3), level: 1, downlink: 9 },
+      { type: 'buffer.read', node: 1, page: indexPage(57) },
+      { type: 'index.visit', node: 1, page: indexPage(57), level: 0, downlink: null },
+      { type: 'buffer.read', node: 1, page: indexPage(56) },
+      { type: 'index.visit', node: 1, page: indexPage(56), level: 0, downlink: null },
+      { type: 'index.entry', node: 1, page: indexPage(56), offset: 7, key: ['42'], row: row(212, 4) },
+      { type: 'buffer.read', node: 1, page: heapPage(212) },
+      { type: 'heap.tuple', node: 1, row: row(212, 4), visible: row(212, 4), matched: true },
+      { type: 'row.emit', node: 1, row: row(212, 4), resultIndex: null },
+      { type: 'row.emit', node: 0, row: row(212, 4), resultIndex: 0 },
+      { type: 'limit.stop', node: 0, stopped: [1] },
+      { type: 'index.markDead', node: 1, page: indexPage(56), offsets: [3] },
+      { type: 'node.finish', node: 0 },
+    ]),
+    limits: [{ node: 0, offset: 0, count: 1 }],
+  }
+  const captions = Array.from({ length: limited.events.length }, (_, i) => stateAt(limited, limitNodes, i + 1).caption)
+
+  it('says a backward scan searches for the last entry, and moves left', () => {
+    expect(captions[2]).toBe(
+      'The scan reads orders_pkey backward, from high keys to low: it searches from the root for the last entry that can match.',
+    )
+    expect(captions[6]).toBe('The search reaches leaf index page 57, and looks for the last entry that can match.')
+    expect(captions[8]).toBe('More entries could match on the next leaf, so the scan moves left to index page 56.')
+    expect(stateAt(limited, limitNodes, 9).index?.backward).toBe(true)
+  })
+
+  it('passes each row up to the Limit, then to the result, and stops the scan when it has its LIMIT', () => {
+    expect(captions[12]).toBe('Row (212,4) goes up to Limit.')
+    expect(captions[13]).toBe('Row (212,4) goes to the result as row 1 (1 of the Limit’s 1).')
+    expect(captions[14]).toBe(
+      `Limit has passed on its 1 row (LIMIT 1), so it stops: it doesn’t ask ${scanTitle} for another row, which stops where it is.`,
+    )
+    // The stopped scan marks the dead entries it found as the query ends.
+    expect(captions[15]).toBe(
+      'As the query ends: no transaction can see the rows of 1 entry on index page 56 any more, so the scan marks it dead; later scans skip it.',
+    )
+  })
+
+  it('shows the row going up, then to the result, once on the heap page; the Limit’s count; the scan stopped', () => {
+    const up = stateAt(limited, limitNodes, 13)
+    expect(up.heap?.rows).toEqual([{ row: row(212, 4), visible: null, outcome: 'up', resultIndex: null, to: 'Limit' }])
+    expect(up.limit).toEqual({ node: 0, count: 1, offset: 0, skipped: 0, passed: 0, stopped: false })
+    const sent = stateAt(limited, limitNodes, 14)
+    expect(sent.heap?.rows).toEqual([{ row: row(212, 4), visible: null, outcome: 'emitted', resultIndex: 0, to: null }])
+    expect(sent.limit?.passed).toBe(1)
+    const stopped = stateAt(limited, limitNodes, 15)
+    expect(stopped.limit?.stopped).toBe(true)
+    expect(stopped.stopped).toEqual(new Set([1]))
+    expect(stopped.activeNode).toBe(0)
+    expect(Object.fromEntries(nodeProgressAt(limited, 15))).toEqual({
+      0: { status: 'active', rows: 1 },
+      1: { status: 'stopped', rows: 1 },
+    })
+  })
+
+  it('skips rows for its OFFSET, and with LIMIT 0 asks for none', () => {
+    const offset: Trace = {
+      ...trace([
+        { type: 'node.start', node: 0 },
+        { type: 'node.start', node: 1 },
+        { type: 'row.emit', node: 1, row: row(1, 1), resultIndex: null },
+        { type: 'limit.skip', node: 0, row: row(1, 1) },
+      ]),
+      limits: [{ node: 0, offset: 2, count: 3 }],
+    }
+    expect(stateAt(offset, limitNodes, 4).caption).toBe('Limit skips row (1,1), for its OFFSET (1 of 2 skipped).')
+    expect(stateAt(offset, limitNodes, 4).limit?.skipped).toBe(1)
+    const none: Trace = {
+      ...trace([
+        { type: 'node.start', node: 0 },
+        { type: 'limit.stop', node: 0, stopped: [] },
+        { type: 'node.finish', node: 0 },
+      ]),
+      limits: [{ node: 0, offset: 0, count: 0 }],
+    }
+    expect(stateAt(none, limitNodes, 2).caption).toBe('Limit needs no rows (LIMIT 0), so it never asks the node below it for one.')
+  })
+})
+
+describe('a Seq Scan a Limit stops', () => {
+  const nodesBelow = planNodes([
+    [0, 'Limit'],
+    [1, 'Seq Scan on orders', 0],
+  ])
+  const stopped: Trace = {
+    ...trace([
+      { type: 'node.start', node: 0 },
+      { type: 'node.start', node: 1 },
+      { type: 'buffer.read', node: 1, page: heapPage(0) },
+      { type: 'heap.page', node: 1, page: heapPage(0), visibleRows: 85, checkedRows: 10, matchedRows: 1 },
+      { type: 'row.emit', node: 1, row: row(0, 10), resultIndex: null },
+      { type: 'row.emit', node: 0, row: row(0, 10), resultIndex: 0 },
+      { type: 'limit.stop', node: 0, stopped: [1] },
+      { type: 'buffer.read', node: 1, page: heapPage(1), ahead: true },
+      { type: 'buffer.hit', node: 1, page: heapPage(2), ahead: true },
+      { type: 'node.finish', node: 0 },
+    ]),
+    limits: [{ node: 0, offset: 0, count: 1 }],
+  }
+
+  it('says how far into its last page it got', () => {
+    const state = stateAt(stopped, nodesBelow, 4)
+    expect(state.caption).toBe(
+      'Heap page 0: 85 rows visible to the query. The scan goes through the first 10 only: with 1 row from it, Limit has all it needs.',
+    )
+    expect(state.heap?.checkedRows).toBe(10)
+  })
+
+  it('shows the pages it read ahead and never used, without making them the page being read', () => {
+    const read = stateAt(stopped, nodesBelow, 8)
+    expect(read.caption).toBe(
+      'Heap page 1 had been read from disk into a buffer ahead of the scan, but the scan stopped before it got there. Postgres reads the pages a scan will need next in batches, and counts them all.',
+    )
+    const hit = stateAt(stopped, nodesBelow, 9)
+    expect(hit.caption).toBe(
+      'Heap page 2 had been pinned ahead of the scan (it was already in shared buffers: a hit), but the scan stopped before it got there. Postgres reads the pages a scan will need next in batches, and counts them all.',
+    )
+    expect(hit.heap?.page.block).toBe(0)
+    expect(hit.buffers.map((slot) => [slot.page.block, slot.ahead])).toEqual([
+      [0, false],
+      [1, true],
+      [2, true],
+    ])
+    expect(hit.pageMarks).toEqual(new Map([[0, 'result'], [1, 'ahead'], [2, 'ahead']]))
+    expect([hit.reads, hit.hits]).toEqual([2, 1])
+  })
+})
+
+describe('a Sort', () => {
+  const sortNodes = planNodes([
+    [0, 'Limit'],
+    [1, 'Sort', 0],
+    [2, 'Seq Scan on orders', 1],
+  ])
+  const sortRow = (block: number, offset: number, total: string, rank: number) => ({ row: row(block, offset), key: [total], rank })
+  const rows = [sortRow(0, 1, '20.00', 3), sortRow(0, 2, '90.00', 1), sortRow(0, 3, '50.00', 2), sortRow(0, 4, '10.00', 4)]
+
+  it('holds the rows it’s given, sorts them, then passes them on in order', () => {
+    const quick: Trace = {
+      ...trace([
+        { type: 'node.start', node: 0 },
+        { type: 'node.start', node: 1 },
+        { type: 'node.start', node: 2 },
+        { type: 'row.emit', node: 2, row: row(0, 1), resultIndex: null },
+        { type: 'row.emit', node: 2, row: row(0, 2), resultIndex: null },
+        { type: 'node.finish', node: 2 },
+        { type: 'sort.done', node: 1, rows: 2, method: 'quicksort' },
+        { type: 'row.emit', node: 1, row: row(0, 2), resultIndex: null },
+        { type: 'row.emit', node: 0, row: row(0, 2), resultIndex: 0 },
+      ]),
+      sorts: [{ node: 1, keys: ['orders.total DESC'], rows: rows.slice(0, 2) }],
+      limits: [{ node: 0, offset: 0, count: 5 }],
+    }
+    const at = (position: number) => stateAt(quick, sortNodes, position)
+    expect(at(5).caption).toBe('Row (0,2) goes up to Sort, which holds it in memory with the others to sort them (2 rows so far).')
+    expect(at(5).sort).toMatchObject({ method: null, received: 2, held: 2, sorted: false })
+    // The Sort works while the scan below gives it rows, and goes on once the scan is done.
+    expect(at(5).working).toEqual([0, 1, 2])
+    expect(at(6).working).toEqual([0, 1])
+    expect(at(5).sort?.rows.map((each) => [each.row.offset, each.key, each.latest])).toEqual([
+      [1, ['20.00'], false],
+      [2, ['90.00'], true],
+    ])
+    expect(at(7).caption).toBe(
+      'Sort has all 2 rows from below: it sorts them in memory by orders.total DESC (a quicksort), then passes them up to Limit in that order.',
+    )
+    expect(at(8).caption).toBe('Row (0,2), 1st in sort order, goes up to Limit.')
+    expect(at(8).sort).toMatchObject({ method: 'quicksort', sorted: true, passed: 1 })
+    expect(at(8).sort?.rows).toEqual([{ row: row(0, 2), key: ['90.00'], position: 0, latest: true }])
+  })
+
+  it('in a top-N heapsort, keeps the best rows, with the worst last, and says what becomes of each new one', () => {
+    const topN: Trace = {
+      ...trace([
+        { type: 'node.start', node: 0 },
+        { type: 'node.start', node: 1 },
+        { type: 'node.start', node: 2 },
+        { type: 'row.emit', node: 2, row: row(0, 1), resultIndex: null },
+        { type: 'row.emit', node: 2, row: row(0, 2), resultIndex: null },
+        { type: 'row.emit', node: 2, row: row(0, 4), resultIndex: null },
+        { type: 'sort.heap', node: 1, kept: [row(0, 1)], dropped: [row(0, 2), row(0, 4)] },
+        { type: 'row.emit', node: 2, row: row(0, 3), resultIndex: null },
+        { type: 'sort.keep', node: 1, row: row(0, 3), replaced: row(0, 1) },
+      ]),
+      // Ranks for an ascending sort here: (0,4) lowest; the heap keeps one row.
+      sorts: [{ node: 1, keys: ['orders.total'], rows: [sortRow(0, 1, '20.00', 2), sortRow(0, 2, '90.00', 4), sortRow(0, 3, '15.00', 1.5), sortRow(0, 4, '10.00', 1)] }],
+      limits: [{ node: 0, offset: 0, count: 1 }],
+    }
+    const at = (position: number) => stateAt(topN, sortNodes, position)
+    expect(at(7).caption).toBe(
+      'Sort holds 3 rows, more than twice the 1 the Limit above needs, so it switches to a top-N heapsort: it keeps the best 1, with the worst of them on top to compare new rows with, and drops the other 2.',
+    )
+    expect(at(7).sort).toMatchObject({ method: 'top-N heapsort', keeps: 1, held: 1, dropped: 2, received: 3 })
+    expect(at(9).caption).toBe(
+      'Row (0,3) (total 15.00) sorts before the worst row kept, (0,1) (total 20.00), so it takes its place, and (0,1) is dropped.',
+    )
+    expect(at(9).sort?.rows.map((each) => each.row.offset)).toEqual([3])
+    expect(at(9).sort?.dropped).toBe(3)
+    const discard: Trace = {
+      ...topN,
+      events: [...topN.events.slice(0, 7), { type: 'row.emit', node: 2, row: row(0, 2), resultIndex: null }, { type: 'sort.discard', node: 1, row: row(0, 2) }],
+    }
+    expect(stateAt(discard, sortNodes, 9).caption).toBe(
+      'Row (0,2) (total 90.00) doesn’t sort before the worst row kept, (0,1) (total 20.00), so it’s dropped.',
+    )
+  })
+})
+
+describe('shortKey', () => {
+  it('names a sort key by its column, without the table or the ordering', () => {
+    expect(shortKey('orders.total DESC')).toBe('total')
+    expect(shortKey('o.order_date DESC NULLS LAST')).toBe('order_date')
+    expect(shortKey('(lower(c.email))')).toBe('lower(c.email)')
   })
 })

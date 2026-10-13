@@ -31,6 +31,13 @@ export interface TableName {
   name: string
 }
 
+/** A table a scan reads, and the name the query calls it by (its alias), e.g. { schema: "public", name: "orders", alias: "o" }. */
+export interface ScannedTable {
+  schema: string
+  name: string
+  alias: string
+}
+
 export interface PlanNode {
   /** The node's number, counting from 0 at the root, depth first: how a replay's trace refers to it. */
   id: number
@@ -51,7 +58,7 @@ export interface PlanNode {
   /** Conditions and counters, e.g. { label: "Index Cond", value: "(orders.id = 4242)" }. */
   details: { label: string; value: string }[]
   /** The table a scan reads, and the name the query calls it by (its alias); null for other nodes. */
-  relation: { schema: string; name: string; alias: string } | null
+  relation: ScannedTable | null
   /** The node's Filter as Postgres deparses it, e.g. "(oi.product_id = 42)"; null if it has none. */
   filter: string | null
   /** Rows the Filter rejected, per loop like actualRows; null if the node has no Filter. */
@@ -74,6 +81,10 @@ export interface PlanNode {
    */
   exactHeapBlocks: number | null
   lossyHeapBlocks: number | null
+  /** A Sort's keys as Postgres writes them, each as it could appear in ORDER BY, e.g. ["orders.total DESC"]; empty for other nodes. */
+  sortKeys: string[]
+  /** How a Sort sorted: "quicksort", "top-N heapsort", "external merge" or "external sort"; null for other nodes. */
+  sortMethod: string | null
   /** The values the node outputs, as expressions over its table, e.g. ["order_id", "(quantity * 2)"] (VERBOSE). */
   output: string[]
   children: PlanNode[]
@@ -194,6 +205,8 @@ function parseNode(node: JsonPlanNode, newId: () => number): PlanNode {
   const heapFetches = node['Heap Fetches']
   const exactHeapBlocks = node['Exact Heap Blocks']
   const lossyHeapBlocks = node['Lossy Heap Blocks']
+  const sortKeys = node['Sort Key']
+  const sortMethod = node['Sort Method']
   return {
     id,
     title: nodeTitle(node),
@@ -218,6 +231,8 @@ function parseNode(node: JsonPlanNode, newId: () => number): PlanNode {
     heapFetches: typeof heapFetches === 'number' ? heapFetches : null,
     exactHeapBlocks: typeof exactHeapBlocks === 'number' ? exactHeapBlocks : null,
     lossyHeapBlocks: typeof lossyHeapBlocks === 'number' ? lossyHeapBlocks : null,
+    sortKeys: Array.isArray(sortKeys) ? (sortKeys as string[]) : [],
+    sortMethod: typeof sortMethod === 'string' ? sortMethod : null,
     output: Array.isArray(node['Output']) ? (node['Output'] as string[]) : [],
     children: (node.Plans ?? []).map((child) => parseNode(child, newId)),
   }

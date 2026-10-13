@@ -782,8 +782,8 @@ describe('a query the replay engine can’t replay yet', () => {
       expect(await reason(`SELECT * FROM orders WHERE id < ANY ('{5,77}')`)).toBe(
         `Animation isn’t available yet for the index condition orders.id < ANY ('{5,77}'::integer[]).`,
       )
-      expect(await reason('SELECT * FROM orders WHERE id < 100 ORDER BY id DESC')).toBe(
-        'Animation isn’t available yet for backward index scans.',
+      expect(await reason('SELECT * FROM orders WHERE id IN (5, 77) ORDER BY id DESC')).toBe(
+        'Animation isn’t available yet for backward index scans of a list of values or a skip scan.',
       )
     })
   })

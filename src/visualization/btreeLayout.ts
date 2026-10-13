@@ -71,8 +71,12 @@ export interface LinkShape {
   y1: number
   x2: number
   y2: number
-  /** down: the pointer the search followed; sibling: to the other pages on the level; right: to the next page on the level. */
-  kind: 'down' | 'sibling' | 'right'
+  /**
+   * down: the pointer the search followed; sibling: to the other pages on the
+   * level; right or left: to the next page the scan read on the level (left
+   * for a backward scan).
+   */
+  kind: 'down' | 'sibling' | 'right' | 'left'
 }
 
 /** The other pages on a level under the same parent, as one faint box. */
@@ -151,7 +155,11 @@ export function layoutBtree(input: LayoutInput): BtreeLayout {
   return layout
 }
 
-/** One level: the pages the search went through on it, left to right, linked to the parent's pointer. */
+/**
+ * One level: the pages the search went through on it, linked to the
+ * parent's pointer: left to right, or for a backward scan, which moves left
+ * along the leaves, right to left.
+ */
 function layoutRow(
   input: LayoutInput,
   steps: PathStep[],
@@ -171,21 +179,24 @@ function layoutRow(
   const skippedWidth = skipped > 0 ? textWidth(`+${skipped}`) + ROW_SPACE : 0
   const earlierWidth = compacts.reduce((sum, shape) => sum + shape.width + ROW_SPACE, 0) + skippedWidth
   // Room for the boxes standing for the parent's other children: kept free unless the page would get too narrow.
-  const counts = parent ? siblingCounts(parent, steps.length) : { left: 0, right: 0 }
+  const backward = input.view.backward
+  const counts = parent ? siblingCounts(parent, steps.length, backward) : { left: 0, right: 0 }
   const leftRoom = counts.left > 0 ? textWidth(pagesText(counts.left)) + ROW_SPACE : 0
   const rightRoom = counts.right > 0 ? textWidth(pagesText(counts.right)) + ROW_SPACE : 0
   const available = width - 2 * MARGIN - earlierWidth
   const withRoom = available - leftRoom - rightRoom
   const full = fullPage(all[lastIndex], steps[lastIndex], input, withRoom >= MIN_PAGE_WIDTH ? withRoom : available)
 
-  // The row starts under the parent's pointer, as far as the width allows.
+  // The page read first sits under the parent's pointer, as far as the width allows.
+  // A backward scan's row is laid out left to right, then mirrored: its first page ends up on the right.
   const rowWidth = earlierWidth + full.width
   const first = compacts[0] ?? full
+  const firstCenter = backward ? rowWidth - first.width / 2 : first.width / 2
   const pointerX = parent ? parent.shape.x + followedGapCenter(parent.shape) : width / 2
   const fits = leftRoom + rowWidth + rightRoom <= width - 2 * MARGIN
   const start = fits
-    ? clamp(pointerX - first.width / 2, MARGIN + leftRoom, width - MARGIN - rowWidth - rightRoom)
-    : clamp(pointerX - first.width / 2, MARGIN, width - MARGIN - rowWidth)
+    ? clamp(pointerX - firstCenter, MARGIN + leftRoom, width - MARGIN - rowWidth - rightRoom)
+    : clamp(pointerX - firstCenter, MARGIN, width - MARGIN - rowWidth)
 
   const shapes: PageShape[] = []
   const links: LinkShape[] = []
@@ -206,10 +217,21 @@ function layoutRow(
   })
   shapes.push({ ...full, x, y })
   boxes.push({ x, width: full.width })
-  // Arrows to the right between neighbors on the level.
+  // Arrows between neighbors on the level, from each page to the next one read.
   for (let i = 1; i < boxes.length; i++) {
     const left = boxes[i - 1]
     links.push({ x1: left.x + left.width, y1: y + NODE_HEIGHT / 2, x2: boxes[i].x, y2: y + NODE_HEIGHT / 2, kind: 'right' })
+  }
+  if (backward) {
+    // Mirror the row within its span: x becomes start + rowWidth - (x - start).
+    const mirror = (at: number) => 2 * start + rowWidth - at
+    for (const shape of shapes) shape.x = mirror(shape.x + shape.width)
+    for (const ghost of ghosts) ghost.x = mirror(ghost.x + ghost.width)
+    for (const link of links) {
+      link.x1 = mirror(link.x1)
+      link.x2 = mirror(link.x2)
+      link.kind = 'left'
+    }
   }
 
   if (parent) {
@@ -237,14 +259,17 @@ function siblingGhosts(
   width: number,
   links: LinkShape[],
 ): GhostShape[] {
-  const { left, right } = siblingCounts(parent, visited)
+  const backward = shapes.length > 1 && shapes[0].x > shapes[shapes.length - 1].x
+  const { left, right } = siblingCounts(parent, visited, backward)
   if (left === 0 && right === 0) return []
   const ghosts: GhostShape[] = []
   const top = parent.shape.y + NODE_HEIGHT
+  const leftmost = Math.min(...shapes.map((shape) => shape.x))
+  const rightmost = Math.max(...shapes.map((shape) => shape.x + shape.width))
   if (left > 0) {
     const text = pagesText(left)
     const ghostWidth = textWidth(text)
-    const x = shapes[0].x - ROW_SPACE - ghostWidth
+    const x = leftmost - ROW_SPACE - ghostWidth
     if (x >= MARGIN - EPSILON) {
       ghosts.push({ x, y, width: ghostWidth, text })
       links.push({ x1: parent.shape.x + gapCenterBefore(parent.shape), y1: top, x2: x + ghostWidth / 2, y2: y, kind: 'sibling' })
@@ -253,8 +278,7 @@ function siblingGhosts(
   if (right > 0) {
     const text = pagesText(right)
     const ghostWidth = textWidth(text)
-    const last = shapes[shapes.length - 1]
-    const x = last.x + last.width + ROW_SPACE
+    const x = rightmost + ROW_SPACE
     if (x + ghostWidth <= width - MARGIN + EPSILON) {
       ghosts.push({ x, y, width: ghostWidth, text })
       links.push({ x1: parent.shape.x + gapCenterAfter(parent.shape), y1: top, x2: x + ghostWidth / 2, y2: y, kind: 'sibling' })
@@ -265,15 +289,18 @@ function siblingGhosts(
 
 /**
  * How many other children the parent has left and right of the one the
- * search went to. After moving right along a level, the pages to the right
- * may belong to another parent, so the right count is only given when the
- * search stayed on one page.
+ * search went to. After moving right along a level (left, for a backward
+ * scan), the pages that way may belong to another parent, so that count is
+ * only given when the search stayed on one page.
  */
-function siblingCounts(parent: { step: PathStep; contents: IndexPageContents }, visited: number) {
+function siblingCounts(parent: { step: PathStep; contents: IndexPageContents }, visited: number, backward: boolean) {
   const items = parent.contents.items
   const followed = items.findIndex((item) => item.offset === parent.step.downlink)
   if (followed < 0) return { left: 0, right: 0 }
-  return { left: followed, right: visited === 1 ? items.length - 1 - followed : 0 }
+  const left = followed
+  const right = items.length - 1 - followed
+  if (visited === 1) return { left, right }
+  return backward ? { left: 0, right } : { left, right: 0 }
 }
 
 function pagesText(count: number) {

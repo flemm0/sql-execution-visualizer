@@ -37,9 +37,10 @@ function leaf(block: number, first: number, count: number): IndexPageContents {
   }
 }
 
-function view(path: IndexView['path'], matchedOffsets: number[] = []): IndexView {
+function view(path: IndexView['path'], matchedOffsets: number[] = [], backward = false): IndexView {
   return {
     index: { id: INDEX, name: 'orders_pkey', kind: 'index', pages: 200 },
+    backward,
     searches: 1,
     path,
     leaf: path.at(-1)?.level === 0 ? (path.at(-1)?.page ?? null) : null,
@@ -171,6 +172,47 @@ describe('laying out the B-tree', () => {
     expect(down?.x2).toBe(row[0].x + row[0].width / 2)
     expect(layout.ghosts.map((ghost) => ghost.text)).toContain('1 page')
     expect(layout.ghosts.some((ghost) => ghost.text.endsWith('pages') && ghost.text !== '1 page')).toBe(false)
+  })
+
+  it('lays the leaves a backward scan moved left along right to left, the last read on the left, linked right to left', () => {
+    const leaves = new Map([
+      [3, root(30)],
+      [101, leaf(101, 10, 300)],
+      [102, leaf(102, 310, 300)],
+      [103, leaf(103, 610, 300)],
+      [104, leaf(104, 910, 300)],
+    ])
+    const moved = view(
+      [
+        { page: page(3), level: 1, downlink: 5 },
+        { page: page(104), level: 0, downlink: null },
+        { page: page(103), level: 0, downlink: null },
+        { page: page(102), level: 0, downlink: null },
+        { page: page(101), level: 0, downlink: null },
+      ],
+      [2, 3],
+      true,
+    )
+    // Wide enough for the count of pages right of the first leaf.
+    const layout = layoutBtree(input({ view: moved, pages: leaves, width: 700 }))
+    const row = layout.pages.slice(1)
+    // In the order read: the first and the one before the last small, the last in full; on screen, right to left.
+    expect(row.map((shape) => [shape.block, shape.compact])).toEqual([
+      [104, true],
+      [102, true],
+      [101, false],
+    ])
+    expect(row[2].x).toBeLessThan(row[1].x)
+    expect(row[1].x).toBeLessThan(row[0].x)
+    // Arrows point left, from each page to the next one read.
+    const arrows = layout.links.filter((link) => link.kind === 'left')
+    expect(arrows).toHaveLength(3)
+    expect(arrows.every((link) => link.x2 < link.x1)).toBe(true)
+    // The followed pointer leads to the first leaf read, now on the right; the count to its right is known, to its left not.
+    const down = layout.links.find((link) => link.kind === 'down')
+    expect(down?.x2).toBe(row[0].x + row[0].width / 2)
+    expect(layout.ghosts.map((ghost) => ghost.text)).toContain('25 pages')
+    expect(layout.ghosts.some((ghost) => ghost.text === '4 pages')).toBe(false)
   })
 
   it('marks entries dead, matched earlier, or marked dead by this scan', () => {

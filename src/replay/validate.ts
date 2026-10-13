@@ -63,7 +63,8 @@ export function validate(input: ValidationInput): Validation {
     if (node.rowsRemovedByFilter !== null) {
       let removed = 0
       for (const event of own) {
-        if (event.type === 'heap.page') removed += event.visibleRows - event.matchedRows
+        // A scan a Limit stopped part way through a page checked the filter on the rows up to there.
+        if (event.type === 'heap.page') removed += (event.checkedRows ?? event.visibleRows) - event.matchedRows
         if (event.type === 'heap.tuple' && event.visible !== null && !event.matched) removed++
         // An index-only scan checks the filter on an all-visible page's entries without fetching their rows.
         if (event.type === 'visibility.check' && event.matched === false) removed++
@@ -79,10 +80,11 @@ export function validate(input: ValidationInput): Validation {
       checks.push(check(`${node.title}: heap fetches`, Math.round(node.heapFetches * node.loops), fetches))
     }
     if (node.exactHeapBlocks !== null) {
-      // A bitmap heap scan's own page accesses are the heap pages its bitmap marks, each once.
+      // A bitmap heap scan's own page accesses are the heap pages its bitmap marks, each once,
+      // besides pages it read ahead and never got to, when a Limit stopped it.
       const pages = new Set<string>()
       for (const event of own) {
-        if (event.type === 'buffer.hit' || event.type === 'buffer.read') pages.add(pageKey(event.page))
+        if ((event.type === 'buffer.hit' || event.type === 'buffer.read') && event.ahead !== true) pages.add(pageKey(event.page))
       }
       checks.push(check(`${node.title}: exact heap blocks`, Math.round(node.exactHeapBlocks * node.loops), pages.size))
     }

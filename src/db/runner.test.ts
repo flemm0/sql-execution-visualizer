@@ -215,6 +215,7 @@ describe('the cache a query leaves', () => {
     // Without the walk from before the query ran, the replay walks the index
     // again, which reads its metapage.
     const replay = await replayAndRestore(db, {
+      sql: 'SELECT * FROM orders WHERE id = 4242',
       plan: result.plan,
       relations: result.cache.relations,
       cacheBefore: result.cache.before,

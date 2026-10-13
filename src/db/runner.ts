@@ -149,6 +149,7 @@ export async function runStatement(
     const shown = rows.slice(0, MAX_DISPLAYED_ROWS)
     const replay = explained
       ? await replayAndRestore(db, {
+          sql: statement.text,
           plan: explained.plan,
           relations: explained.cache.relations,
           cacheBefore: explained.cache.before,

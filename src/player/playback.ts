@@ -1,4 +1,14 @@
-import { passesRowOn, type HeapTupleEvent, type PageRef, type RowRef, type Trace, type TraceEvent, type TraceRelation } from '../replay/trace'
+import {
+  passesRowOn,
+  type HeapTupleEvent,
+  type LimitContents,
+  type PageRef,
+  type RowRef,
+  type SortRow,
+  type Trace,
+  type TraceEvent,
+  type TraceRelation,
+} from '../replay/trace'
 
 /*
  * What the visualization shows at a point in the trace: the state after the
@@ -17,6 +27,8 @@ export interface NodeInfo {
   title: string
   /** Whether it has a Filter, which rows it fetches can fail. */
   hasFilter: boolean
+  /** The node it passes its rows up to; absent for the top node, which sends them to the result. */
+  parent?: number
 }
 
 /** A page this query has asked for, in the order it first asked. */
@@ -24,6 +36,8 @@ export interface BufferSlot {
   page: PageRef
   /** Whether it was already in shared buffers when the query first asked for it (a hit) rather than read from disk. */
   wasCached: boolean
+  /** Whether a scan asked for it ahead of time and never got to it (a Limit stopped the scan). */
+  ahead: boolean
 }
 
 /** An index page the current search went through. */
@@ -47,6 +61,8 @@ export interface MatchedEntry {
 /** What the index zone shows: the current search down the index, and the matches on its leaf. */
 export interface IndexView {
   index: TraceRelation
+  /** Whether the scan reads the index backward: from high keys to low, moving left along the leaves. */
+  backward: boolean
   /** How many searches down from the root have started, this one included. */
   searches: number
   /** The pages this search went through, from the root down, then right along the leaves. */
@@ -67,8 +83,10 @@ export interface IndexView {
 
 /** What happened to a row on the current heap page. */
 export type RowOutcome =
-  /** Visible, and passed any filter: it goes to the result next. */
+  /** Visible, and passed any filter: it goes up next. */
   | 'passed'
+  /** Passed up to the plan node above (a Sort or a Limit), not yet to the result. */
+  | 'up'
   /** Sent to the result. */
   | 'emitted'
   /** Failed the filter. */
@@ -84,14 +102,20 @@ export interface HeapRow {
   outcome: RowOutcome
   /** Which result row it became, counting from 0; null until it's emitted. */
   resultIndex: number | null
+  /** For a row passed up, the title of the node it went up to; null otherwise. */
+  to: string | null
 }
 
 /** What the heap zone shows in detail: the page being read now. */
 export interface HeapView {
   page: PageRef
+  /** The plan node reading it. */
+  node: number
   /** For a scan that goes through the whole page: rows visible to the query, and rows that passed the filter. */
   visibleRows: number | null
   matchedRows: number | null
+  /** When a Limit stopped the scan part way through the page, the visible rows it got to; null otherwise. */
+  checkedRows: number | null
   /**
    * For an index-only scan, what the visibility map says about the page:
    * all-visible (its rows come from the index alone, and the page isn't
@@ -109,10 +133,11 @@ export interface HeapView {
 /**
  * Each heap page's part in the query so far, for the mini-map: read
  * ('touched'), read and gave rows to the result ('result'), all-visible, so
- * an index-only scan didn't read it ('fromIndex'), or marked in a bitmap and
- * not read yet ('bitmap').
+ * an index-only scan didn't read it ('fromIndex'), marked in a bitmap and
+ * not read yet ('bitmap'), or read ahead by a scan that a Limit stopped
+ * before it got there ('ahead').
  */
-export type PageMark = 'touched' | 'result' | 'fromIndex' | 'bitmap'
+export type PageMark = 'touched' | 'result' | 'fromIndex' | 'bitmap' | 'ahead'
 
 /**
  * The bitmap a bitmap index scan builds: for each heap page, the rows on it
@@ -127,6 +152,59 @@ export interface BitmapView {
   rows: number
   /** How many of its pages have been read so far. */
   pagesRead: number
+}
+
+/** A row in the Sort zone's list. */
+export interface SortListRow {
+  row: RowRef
+  /** Its sort key's values, as Postgres writes them. */
+  key: (string | null)[]
+  /** For a row passed on, its place in the sorted order, from 0; null otherwise. */
+  position: number | null
+  /** Whether the step on screen gave, kept or passed on this row. */
+  latest: boolean
+}
+
+/** What the Sort zone shows: the rows a Sort holds, then passes on in order. */
+export interface SortView {
+  node: number
+  /** Its sort keys as the plan writes them, e.g. ["orders.total DESC"]. */
+  keys: string[]
+  /** How it sorts: null while it only collects rows, until it switches to a top-N heapsort or sorts. */
+  method: 'quicksort' | 'top-N heapsort' | null
+  /** Rows it has been given so far. */
+  received: number
+  /** Rows it holds now. */
+  held: number
+  /** In a top-N heapsort, how many rows it keeps; null otherwise. */
+  keeps: number | null
+  /** Rows a top-N heapsort has dropped. */
+  dropped: number
+  /** Whether it has sorted its rows, and passes them on. */
+  sorted: boolean
+  /** Rows passed on so far. */
+  passed: number
+  /**
+   * The rows to list (at most SHOWN_ROWS): while it collects rows, the latest
+   * given, the latest last; in a top-N heapsort, the best kept, in sort
+   * order, with the worst last; once sorted, the latest passed on.
+   */
+  rows: SortListRow[]
+}
+
+/** What a Limit has done so far. */
+export interface LimitView {
+  node: number
+  /** Its LIMIT; null without one. */
+  count: number | null
+  /** Its OFFSET; 0 without one. */
+  offset: number
+  /** Rows skipped for the OFFSET so far. */
+  skipped: number
+  /** Rows passed on so far. */
+  passed: number
+  /** Whether it has its LIMIT and stopped. */
+  stopped: boolean
 }
 
 export interface PlaybackState {
@@ -144,6 +222,8 @@ export interface PlaybackState {
   activeNode: number | null
   /** The node that worked last (the active one, or the one that just finished). */
   lastNode: number | null
+  /** The nodes started and not finished (nor stopped), the latest last: a parent works while its child does. */
+  working: number[]
   hits: number
   reads: number
   /** The pages this query has asked for, in the order it first asked. */
@@ -161,6 +241,12 @@ export interface PlaybackState {
   index: IndexView | null
   /** Null for a plan without a bitmap scan. */
   bitmap: BitmapView | null
+  /** The Sort that worked last; null for a plan without one, or before it starts. */
+  sort: SortView | null
+  /** The Limit; null for a plan without one, or before it starts. */
+  limit: LimitView | null
+  /** Nodes a Limit stopped early: they never finish. */
+  stopped: Set<number>
 }
 
 /**
@@ -179,8 +265,8 @@ export function resultRowsAt(trace: Trace, position: number): number {
   return rows
 }
 
-/** Where a plan node is at a step: not started, working, or finished. */
-export type NodeStatus = 'waiting' | 'active' | 'done'
+/** Where a plan node is at a step: not started, working, finished, or stopped by a Limit before it finished. */
+export type NodeStatus = 'waiting' | 'active' | 'done' | 'stopped'
 
 /** A plan node's part in the trace so far, for the plan tree. */
 export interface NodeProgress {
@@ -195,7 +281,8 @@ export interface NodeProgress {
 /**
  * Each plan node's progress after the first `position` events of the trace,
  * by node id. Every node the trace mentions is in it, from 'waiting' before
- * its node.start to 'done' after its node.finish.
+ * its node.start to 'done' after its node.finish, or 'stopped' when a Limit
+ * above it stops.
  */
 export function nodeProgressAt(trace: Trace, position: number): Map<number, NodeProgress> {
   const progress = new Map<number, NodeProgress>()
@@ -210,6 +297,12 @@ export function nodeProgressAt(trace: Trace, position: number): Map<number, Node
     if (event.type === 'node.start') node.status = 'active'
     else if (event.type === 'node.finish') node.status = 'done'
     else if (passesRowOn(event)) node.rows++
+    if (event.type === 'limit.stop') {
+      for (const stopped of event.stopped) {
+        const below = progress.get(stopped)
+        if (below !== undefined) below.status = 'stopped'
+      }
+    }
   }
   return progress
 }
@@ -232,6 +325,7 @@ export function stateAt(trace: Trace, nodes: Map<number, NodeInfo>, position: nu
     caption: startCaption(trace),
     activeNode: null,
     lastNode: null,
+    working: [],
     hits: 0,
     reads: 0,
     buffers: [],
@@ -242,14 +336,54 @@ export function stateAt(trace: Trace, nodes: Map<number, NodeInfo>, position: nu
     heap: null,
     index: null,
     bitmap: null,
+    sort: null,
+    limit: null,
+    stopped: new Set(),
   }
-  const slots = new Set<string>()
-  const working: number[] = []
+  const context: Context = {
+    relations,
+    nodes,
+    slots: new Set(),
+    working: [],
+    sortRows: new Map(trace.sorts.map((sort) => [sort.node, new Map(sort.rows.map((row) => [rowKey(row.row), row]))])),
+    sortKeys: new Map(trace.sorts.map((sort) => [sort.node, sort.keys])),
+    limits: new Map(trace.limits.map((limit) => [limit.node, limit])),
+    sorts: new Map(),
+  }
   for (let i = 0; i < end; i++) {
-    apply(state, trace.events[i], relations, slots, working)
+    apply(state, trace.events[i], context)
   }
-  if (state.current !== null) state.caption = describe(state.current, state, relations, nodes)
+  state.working = [...context.working]
+  if (state.sort !== null) state.sort.rows = sortList(context.sorts.get(state.sort.node) as SortWork, state.current)
+  if (state.current !== null) state.caption = describe(state.current, state, context)
   return state
+}
+
+/** What applying events needs besides the state. */
+interface Context {
+  relations: Map<number, TraceRelation>
+  nodes: Map<number, NodeInfo>
+  /** The pages in the buffers zone, as "relation/fork/block". */
+  slots: Set<string>
+  /** The nodes started and not finished, the latest last. */
+  working: number[]
+  /** Each Sort's rows, by node, then by rowKey. */
+  sortRows: Map<number, Map<string, SortRow>>
+  sortKeys: Map<number, string[]>
+  limits: Map<number, LimitContents>
+  /** Each Sort's rows so far, by node. */
+  sorts: Map<number, SortWork>
+}
+
+/** A Sort's rows so far, from which its SortView's list is made at the end. */
+interface SortWork {
+  view: SortView
+  /** The latest rows given to it, the latest last. */
+  given: SortRow[]
+  /** In a top-N heapsort, the rows it keeps, by rowKey. */
+  kept: Map<string, SortRow>
+  /** The latest rows it passed on, with their places in the sorted order. */
+  passed: { row: SortRow; position: number }[]
 }
 
 /** The caption before the first step. */
@@ -268,27 +402,23 @@ function scannedTable(trace: Trace): TraceRelation | null {
   return tables.size === 1 ? [...tables.values()][0] : null
 }
 
-/**
- * Applies one event to the state. `slots` holds the pages in the buffers
- * zone, as "relation/fork/block"; `working`, the nodes started and not
- * finished, the latest last.
- */
-function apply(
-  state: PlaybackState,
-  event: TraceEvent,
-  relations: Map<number, TraceRelation>,
-  slots: Set<string>,
-  working: number[],
-) {
+/** Applies one event to the state. */
+function apply(state: PlaybackState, event: TraceEvent, context: Context) {
+  const { relations, slots, working } = context
   state.current = event
   state.lastNode = event.node
   if (passesRowOn(event)) state.nodeRows.set(event.node, (state.nodeRows.get(event.node) ?? 0) + 1)
 
   switch (event.type) {
-    case 'node.start':
+    case 'node.start': {
       working.push(event.node)
       state.activeNode = event.node
+      const limit = context.limits.get(event.node)
+      if (limit !== undefined) {
+        state.limit = { node: event.node, count: limit.count, offset: limit.offset, skipped: 0, passed: 0, stopped: false }
+      }
       break
+    }
 
     case 'node.finish':
       working.splice(working.lastIndexOf(event.node), 1)
@@ -303,10 +433,15 @@ function apply(
       const key = `${event.page.relation}/${event.page.fork ?? 'main'}/${event.page.block}`
       if (!slots.has(key)) {
         slots.add(key)
-        state.buffers.push({ page: event.page, wasCached: hit })
+        state.buffers.push({ page: event.page, wasCached: hit, ahead: event.ahead === true })
+      }
+      // A page read ahead that the scan never got to: it isn't the page being read now.
+      if (event.ahead === true) {
+        if (!state.pageMarks.has(event.page.block)) state.pageMarks.set(event.page.block, 'ahead')
+        break
       }
       if (relations.get(event.page.relation)?.kind === 'table' && event.page.fork === undefined) {
-        const heap = enterHeapPage(state, event.page)
+        const heap = enterHeapPage(state, event.page, event.node)
         markTouched(state, event.page.block)
         // A bitmap heap scan reading the next page its bitmap marks.
         const bitmap = state.bitmap
@@ -320,9 +455,10 @@ function apply(
     }
 
     case 'heap.page': {
-      const heap = enterHeapPage(state, event.page)
+      const heap = enterHeapPage(state, event.page, event.node)
       heap.visibleRows = event.visibleRows
       heap.matchedRows = event.matchedRows
+      heap.checkedRows = event.checkedRows ?? null
       markTouched(state, event.page.block)
       break
     }
@@ -330,6 +466,7 @@ function apply(
     case 'index.search':
       state.index = {
         index: relations.get(event.index) ?? { id: event.index, name: `index ${event.index}`, kind: 'index', pages: 0 },
+        backward: event.backward === true,
         searches: (state.index?.searches ?? 0) + 1,
         path: [],
         leaf: null,
@@ -374,39 +511,69 @@ function apply(
       break
 
     case 'heap.tuple': {
-      const heap = enterHeapPage(state, { relation: event.row.relation, block: event.row.block })
+      const heap = enterHeapPage(state, { relation: event.row.relation, block: event.row.block }, event.node)
       let outcome: RowOutcome
       if (event.visible === null) outcome = 'invisible'
       else outcome = event.matched ? 'passed' : 'rejected'
       heap.rowCount++
-      heap.rows = latest(heap.rows, { row: event.row, visible: updatedVersion(event), outcome, resultIndex: null })
+      heap.rows = latest(heap.rows, { row: event.row, visible: updatedVersion(event), outcome, resultIndex: null, to: null })
       break
     }
 
     case 'visibility.check': {
-      const heap = enterHeapPage(state, event.page)
+      const heap = enterHeapPage(state, event.page, event.node)
       heap.allVisible = event.allVisible
       if (event.allVisible) {
         state.pageMarks.set(event.page.block, 'fromIndex')
         if (event.matched === false) {
           heap.rowCount++
-          heap.rows = latest(heap.rows, { row: event.row, visible: null, outcome: 'rejected', resultIndex: null })
+          heap.rows = latest(heap.rows, { row: event.row, visible: null, outcome: 'rejected', resultIndex: null, to: null })
         }
       }
       break
     }
 
     case 'row.emit': {
+      // A row going up to a Sort, which holds it; or one a Sort passes on, in order.
+      const parent = context.nodes.get(event.node)?.parent
+      const into = parent === undefined ? undefined : sortWork(state, context, parent)
+      if (into !== undefined) {
+        const row = context.sortRows.get(into.view.node)?.get(rowKey(event.row))
+        into.view.received++
+        if (into.view.method === null) into.view.held++
+        if (row !== undefined) into.given = latest(into.given, row)
+      }
+      const from = context.sorts.get(event.node)
+      if (from !== undefined) {
+        state.sort = from.view
+        const row = context.sortRows.get(event.node)?.get(rowKey(event.row))
+        if (row !== undefined) from.passed = latest(from.passed, { row, position: from.view.passed })
+        from.view.passed++
+      }
+      if (state.limit?.node === event.node) state.limit.passed++
       const heap = state.heap
       if (heap !== null && heap.page.block === event.row.block && heap.page.relation === event.row.relation) {
-        const fetched = lastPassed(heap.rows, event.row)
-        if (fetched) {
-          fetched.outcome = 'emitted'
-          fetched.resultIndex = event.resultIndex
-        } else {
-          // A scan that goes through the whole page emits rows it didn't list one by one.
-          heap.rowCount++
-          heap.rows = latest(heap.rows, { row: event.row, visible: null, outcome: 'emitted', resultIndex: event.resultIndex })
+        const outcome = event.resultIndex === null ? 'up' : 'emitted'
+        const to = event.resultIndex === null && parent !== undefined ? (context.nodes.get(parent)?.title ?? null) : null
+        if (event.node === heap.node) {
+          const fetched = lastWith(heap.rows, event.row, 'passed')
+          if (fetched) {
+            fetched.outcome = outcome
+            fetched.resultIndex = event.resultIndex
+            fetched.to = to
+          } else {
+            // A scan that goes through the whole page passes up rows it didn't list one by one.
+            heap.rowCount++
+            heap.rows = latest(heap.rows, { row: event.row, visible: null, outcome, resultIndex: event.resultIndex, to })
+          }
+        } else if (event.resultIndex !== null) {
+          // A Limit above the scan sends the row on to the result.
+          const up = lastWith(heap.rows, event.row, 'up')
+          if (up) {
+            up.outcome = 'emitted'
+            up.resultIndex = event.resultIndex
+            up.to = null
+          }
         }
       }
       if (event.resultIndex !== null) {
@@ -416,7 +583,91 @@ function apply(
       }
       break
     }
+
+    case 'sort.heap': {
+      const work = sortWork(state, context, event.node) as SortWork
+      work.view.method = 'top-N heapsort'
+      work.view.keeps = event.kept.length
+      work.view.held = event.kept.length
+      work.view.dropped += event.dropped.length
+      const rows = context.sortRows.get(event.node)
+      for (const kept of event.kept) {
+        const row = rows?.get(rowKey(kept))
+        if (row !== undefined) work.kept.set(rowKey(kept), row)
+      }
+      break
+    }
+
+    case 'sort.keep': {
+      const work = sortWork(state, context, event.node) as SortWork
+      work.kept.delete(rowKey(event.replaced))
+      const row = context.sortRows.get(event.node)?.get(rowKey(event.row))
+      if (row !== undefined) work.kept.set(rowKey(event.row), row)
+      work.view.dropped++
+      break
+    }
+
+    case 'sort.discard':
+      ;(sortWork(state, context, event.node) as SortWork).view.dropped++
+      break
+
+    case 'sort.done': {
+      const view = (sortWork(state, context, event.node) as SortWork).view
+      view.method = event.method
+      view.held = event.rows
+      view.sorted = true
+      break
+    }
+
+    case 'limit.skip':
+      if (state.limit?.node === event.node) state.limit.skipped++
+      break
+
+    case 'limit.stop':
+      if (state.limit?.node === event.node) state.limit.stopped = true
+      // The nodes below it stop where they are: they're no longer working.
+      for (const node of event.stopped) {
+        state.stopped.add(node)
+        const at = working.lastIndexOf(node)
+        if (at >= 0) working.splice(at, 1)
+      }
+      state.activeNode = working.at(-1) ?? null
+      break
   }
+}
+
+/** The Sort node `node`'s work so far, made the Sort zone's; undefined if `node` isn't a Sort. */
+function sortWork(state: PlaybackState, context: Context, node: number): SortWork | undefined {
+  const keys = context.sortKeys.get(node)
+  if (keys === undefined) return undefined
+  let work = context.sorts.get(node)
+  if (work === undefined) {
+    const view: SortView = { node, keys, method: null, received: 0, held: 0, keeps: null, dropped: 0, sorted: false, passed: 0, rows: [] }
+    work = { view, given: [], kept: new Map(), passed: [] }
+    context.sorts.set(node, work)
+  }
+  state.sort = work.view
+  return work
+}
+
+/** The Sort zone's list (see SortView.rows), for the step on screen, `current`. */
+function sortList(work: SortWork, current: TraceEvent | null): SortListRow[] {
+  const isCurrent = (row: RowRef) =>
+    current !== null && 'row' in current && current.row.block === row.block && current.row.offset === row.offset
+  if (work.view.sorted) {
+    return work.passed.map(({ row, position }) => ({ row: row.row, key: row.key, position, latest: isCurrent(row.row) }))
+  }
+  if (work.view.method === 'top-N heapsort') {
+    const kept = [...work.kept.values()].sort((a, b) => a.rank - b.rank)
+    // The best ones, and the worst: the one a new row has to beat.
+    const shown = kept.length <= SHOWN_ROWS ? kept : [...kept.slice(0, SHOWN_ROWS - 1), kept[kept.length - 1]]
+    return shown.map((row) => ({ row: row.row, key: row.key, position: null, latest: isCurrent(row.row) }))
+  }
+  return work.given.map((row) => ({ row: row.row, key: row.key, position: null, latest: isCurrent(row.row) }))
+}
+
+function rowKey(row: RowRef) {
+  return `${row.relation}/${row.block}/${row.offset}`
 }
 
 /** Marks a heap page as read, unless it already says more (it gave rows to the result, or the visibility map spared it). */
@@ -443,11 +694,11 @@ function updatedVersion(event: HeapTupleEvent): RowRef | null {
   return visible
 }
 
-/** The latest listed row that passed and is waiting to be emitted as `emitted`. */
-function lastPassed(rows: HeapRow[], emitted: RowRef): HeapRow | undefined {
+/** The latest listed row with this outcome whose version the query sees is `emitted`. */
+function lastWith(rows: HeapRow[], emitted: RowRef, outcome: RowOutcome): HeapRow | undefined {
   for (let i = rows.length - 1; i >= 0; i--) {
     const seen = rows[i].visible ?? rows[i].row
-    if (rows[i].outcome === 'passed' && seen.block === emitted.block && seen.offset === emitted.offset) return rows[i]
+    if (rows[i].outcome === outcome && seen.block === emitted.block && seen.offset === emitted.offset) return rows[i]
   }
   return undefined
 }
@@ -457,14 +708,13 @@ function lastPassed(rows: HeapRow[], emitted: RowRef): HeapRow | undefined {
  * state after it. Only the step on screen needs one, so stateAt writes just
  * that one.
  */
-function describe(
-  event: TraceEvent,
-  state: PlaybackState,
-  relations: Map<number, TraceRelation>,
-  nodes: Map<number, NodeInfo>,
-): string {
+function describe(event: TraceEvent, state: PlaybackState, context: Context): string {
+  const { relations, nodes } = context
   const node = nodes.get(event.node)
   const title = node?.title ?? `Plan node ${event.node}`
+  /** Where the node's rows go: the result, or the node above. */
+  const parentTitle = node?.parent === undefined ? null : (nodes.get(node.parent)?.title ?? `plan node ${node.parent}`)
+  const goesUp = parentTitle === null ? 'goes to the result' : `goes up to ${parentTitle}`
 
   switch (event.type) {
     case 'node.start':
@@ -485,6 +735,13 @@ function describe(
     case 'buffer.hit':
     case 'buffer.read': {
       const page = capitalize(pageName(event.page, relations))
+      if (event.ahead === true) {
+        const asked =
+          event.type === 'buffer.read'
+            ? 'had been read from disk into a buffer ahead of the scan'
+            : 'had been pinned ahead of the scan (it was already in shared buffers: a hit)'
+        return `${page} ${asked}, but the scan stopped before it got there. Postgres reads the pages a scan will need next in batches, and counts them all.`
+      }
       const access =
         event.type === 'buffer.hit'
           ? 'is already in shared buffers: a hit, no disk read.'
@@ -502,13 +759,21 @@ function describe(
     case 'heap.page': {
       const page = capitalize(pageName(event.page, relations))
       const visible = `${rowCount(event.visibleRows)} visible to the query`
-      if (!node?.hasFilter) return `${page}: ${visible}; with no filter, every one goes to the result.`
+      if (event.checkedRows !== undefined) {
+        const checked = node?.hasFilter ? 'checks the filter on' : 'goes through'
+        const which = event.checkedRows === 1 ? 'the first' : `the first ${integer.format(event.checkedRows)}`
+        return `${page}: ${visible}. The scan ${checked} ${which} only: with ${rowCount(event.matchedRows)} from it, ${parentTitle ?? 'the node above'} has all it needs.`
+      }
+      if (!node?.hasFilter) return `${page}: ${visible}; with no filter, every one ${goesUp}.`
       return `${page}: ${visible}, checked against the filter; ${integer.format(event.matchedRows)} ${event.matchedRows === 1 ? 'passes' : 'pass'}.`
     }
 
     case 'index.search': {
       const searches = state.index?.searches ?? 1
       const name = state.index?.index.name ?? 'the index'
+      if (event.backward === true) {
+        return `The scan reads ${name} backward, from high keys to low: it searches from the root for the last entry that can match.`
+      }
       return searches === 1
         ? `The scan searches ${name} from its root for the first entry that can match.`
         : `The scan searches ${name} again from the root (search ${integer.format(searches)}), for the next values it needs.`
@@ -519,9 +784,11 @@ function describe(
       const previous = path.length >= 2 ? path[path.length - 2] : undefined
       const page = pageName(event.page, relations)
       if (event.level === 0) {
-        return previous !== undefined && previous.downlink === null
-          ? `More entries could match on the next leaf, so the scan moves right to ${page}.`
-          : `The search reaches leaf ${page}, and looks for the first entry that can match.`
+        const backward = state.index?.backward === true
+        if (previous !== undefined && previous.downlink === null) {
+          return `More entries could match on the next leaf, so the scan moves ${backward ? 'left' : 'right'} to ${page}.`
+        }
+        return `The search reaches leaf ${page}, and looks for the ${backward ? 'last' : 'first'} entry that can match.`
       }
       if (event.downlink === null) return `The search moves right to ${page} (level ${event.level}).`
       const where = previous === undefined ? 'the root' : `level ${event.level}`
@@ -540,7 +807,9 @@ function describe(
       const one = event.offsets.length === 1
       const entries = one ? '1 entry' : `${integer.format(event.offsets.length)} entries`
       const them = one ? 'it' : 'them'
-      return `No transaction can see the rows of ${entries} on ${pageName(event.page, relations)} any more, so the scan marks ${them} dead; later scans skip ${them}.`
+      const marks = `No transaction can see the rows of ${entries} on ${pageName(event.page, relations)} any more, so the scan marks ${them} dead; later scans skip ${them}.`
+      // A scan a Limit stopped does it as the query ends.
+      return state.stopped.has(event.node) ? `As the query ends: ${marks.charAt(0).toLowerCase()}${marks.slice(1)}` : marks
     }
 
     case 'heap.tuple': {
@@ -567,16 +836,98 @@ function describe(
       return event.matched ? `${skip}, and they pass the filter.` : `${skip}. Its values fail the filter, so it’s rejected.`
     }
 
-    case 'row.emit':
-      if (event.resultIndex === null) return `Row ${rowName(event.row)} goes up to the next plan node.`
-      return `Row ${rowName(event.row)} goes to the result as row ${integer.format(event.resultIndex + 1)}.`
+    case 'row.emit': {
+      const sort = context.sorts.get(event.node)
+      // A Sort passes its rows on in sorted order.
+      const row = sort === undefined ? `Row ${rowName(event.row)}` : `Row ${rowName(event.row)}, ${ordinal(sort.view.passed - 1)} in sort order,`
+      if (event.resultIndex !== null) {
+        const limit = state.limit?.node === event.node ? state.limit : null
+        const of = limit?.count != null ? ` (${integer.format(limit.passed)} of the Limit’s ${integer.format(limit.count)})` : ''
+        return `${row} goes to the result as row ${integer.format(event.resultIndex + 1)}${of}.`
+      }
+      const into = node?.parent === undefined ? undefined : context.sorts.get(node.parent)
+      if (into !== undefined && into.view.method === null) {
+        return `${row} ${goesUp}, which holds it in memory with the others to sort them (${rowCount(into.view.held)} so far).`
+      }
+      return `${row} ${goesUp}.`
+    }
+
+    case 'sort.heap': {
+      const keeps = event.kept.length
+      return `${title} holds ${rowCount(keeps + event.dropped.length)}, more than twice the ${integer.format(keeps)} the Limit above needs, so it switches to a top-N heapsort: it keeps the best ${integer.format(keeps)}, with the worst of them on top to compare new rows with, and drops the other ${integer.format(event.dropped.length)}.`
+    }
+
+    case 'sort.keep': {
+      const replaced = context.sortRows.get(event.node)?.get(rowKey(event.replaced))
+      return `Row ${rowName(event.row)}${keyText(context, event.node, event.row)} sorts before the worst row kept, ${rowName(event.replaced)}${replaced ? keyText(context, event.node, event.replaced) : ''}, so it takes its place, and ${rowName(event.replaced)} is dropped.`
+    }
+
+    case 'sort.discard': {
+      const worst = worstKept(context, event.node)
+      const than = worst === null ? 'the worst row kept' : `the worst row kept, ${rowName(worst.row)}${keyText(context, event.node, worst.row)}`
+      return `Row ${rowName(event.row)}${keyText(context, event.node, event.row)} doesn’t sort before ${than}, so it’s dropped.`
+    }
+
+    case 'sort.done': {
+      const by = `by ${(context.sortKeys.get(event.node) ?? []).join(', ')}`
+      const passes = parentTitle === null ? 'sends them to the result in that order' : `passes them up to ${parentTitle} in that order`
+      if (event.method === 'quicksort') {
+        return `${title} has all ${rowCount(event.rows)} from below: it sorts them in memory ${by} (a quicksort), then ${passes}.`
+      }
+      const seen = state.sort?.received ?? event.rows
+      return `${title} has seen all ${rowCount(seen)} from below and kept the best ${integer.format(event.rows)}: it sorts those ${by}, then ${passes}.`
+    }
+
+    case 'limit.skip': {
+      const limit = state.limit
+      const skipped = limit === null ? '' : ` (${integer.format(limit.skipped)} of ${integer.format(limit.offset)} skipped)`
+      return `${title} skips row ${rowName(event.row)}, for its OFFSET${skipped}.`
+    }
+
+    case 'limit.stop': {
+      const count = state.limit?.node === event.node ? (state.limit.count ?? 0) : 0
+      if (count === 0) return `${title} needs no rows (LIMIT 0), so it never asks the node below it for one.`
+      const names = event.stopped.map((stopped) => nodes.get(stopped)?.title ?? `plan node ${stopped}`)
+      const passed = `${title} has passed on its ${rowCount(count)} (LIMIT ${integer.format(count)}), so it stops`
+      if (names.length === 0) return `${passed}.`
+      const which = names.length === 1 ? 'which stops where it is' : `and ${names.join(' and ')} stop where they are`
+      return `${passed}: it doesn’t ask ${names[0]} for another row, ${which}.`
+    }
   }
 }
 
+/** " (total 512.00)": a row's sort key, as the Sort zone writes it; empty if unknown. */
+function keyText(context: Context, sort: number, row: RowRef): string {
+  const found = context.sortRows.get(sort)?.get(rowKey(row))
+  if (found === undefined) return ''
+  const keys = context.sortKeys.get(sort) ?? []
+  return ` (${found.key.map((value, i) => `${shortKey(keys[i] ?? '')} ${value ?? 'NULL'}`).join(', ')})`
+}
+
+/** A top-N heapsort's worst row kept now: the one a new row has to beat. */
+function worstKept(context: Context, sort: number): SortRow | null {
+  const kept = [...(context.sorts.get(sort)?.kept.values() ?? [])]
+  return kept.reduce<SortRow | null>((worst, row) => (worst === null || row.rank > worst.rank ? row : worst), null)
+}
+
+/** A sort key's name for captions: its expression without the table, ordering and parentheses, e.g. "total". */
+export function shortKey(key: string): string {
+  const expression = key.replace(/ NULLS (FIRST|LAST)$/, '').replace(/ DESC$/, '').replace(/ USING \S+$/, '')
+  return expression.replace(/^\((.*)\)$/, '$1').replace(/^[\w"]+\./, '')
+}
+
+/** "1st", "2nd", "3rd", "4th", … for a place counted from 0. */
+function ordinal(position: number): string {
+  const n = position + 1
+  const tens = n % 100
+  const suffix = tens >= 11 && tens <= 13 ? 'th' : n % 10 === 1 ? 'st' : n % 10 === 2 ? 'nd' : n % 10 === 3 ? 'rd' : 'th'
+  return `${integer.format(n)}${suffix}`
+}
+
 /** Makes `page` the heap zone's page, starting a fresh view when it's another page. */
-function enterHeapPage(state: PlaybackState, page: PageRef): HeapView {
+function enterHeapPage(state: PlaybackState, page: PageRef, node: number): HeapView {
   if (state.heap && state.heap.page.relation === page.relation && state.heap.page.block === page.block) return state.heap
-  state.heap = { page, visibleRows: null, matchedRows: null, allVisible: null, bitmapRows: null, rows: [], rowCount: 0 }
+  state.heap = { page, node, visibleRows: null, matchedRows: null, checkedRows: null, allVisible: null, bitmapRows: null, rows: [], rowCount: 0 }
   return state.heap
 }
 
