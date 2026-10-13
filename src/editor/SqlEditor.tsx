@@ -1,5 +1,5 @@
 import { acceptCompletion } from '@codemirror/autocomplete'
-import { indentWithTab } from '@codemirror/commands'
+import { indentWithTab, isolateHistory } from '@codemirror/commands'
 import { PostgreSQL, sql, type SQLNamespace } from '@codemirror/lang-sql'
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { Compartment, EditorSelection, Prec } from '@codemirror/state'
@@ -103,6 +103,21 @@ export function SqlEditor({ initialText, database, onRun, onChange, viewRef }: S
 /** Moves the editor's cursor to an offset and selects up to `to`, scrolling it into view. */
 export function selectInEditor(view: EditorView, from: number, to = from) {
   view.dispatch({ selection: EditorSelection.single(from, to), scrollIntoView: true })
+  view.focus()
+}
+
+/**
+ * Replaces all the editor's text, puts the cursor at `cursor`, scrolls to the
+ * top and focuses the editor. It is one step in the undo history, kept apart from the typing
+ * around it, so Cmd/Ctrl+Z brings back the text it replaced.
+ */
+export function replaceEditorText(view: EditorView, text: string, cursor: number) {
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: text },
+    selection: EditorSelection.cursor(cursor),
+    annotations: isolateHistory.of('full'),
+    effects: EditorView.scrollIntoView(0, { y: 'start' }),
+  })
   view.focus()
 }
 

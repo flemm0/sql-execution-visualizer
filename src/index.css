@@ -120,6 +120,15 @@
     @apply fixed inset-auto m-0 max-w-xs rounded-md border border-line-strong bg-surface-2 px-2.5 py-1.5 font-sans text-xs leading-snug font-normal tracking-normal text-fg normal-case shadow-lg;
   }
 
+  /* The editor toolbar's Examples menu (src/editor/ExamplesMenu.tsx): a popover in the top layer, placed under its button. */
+  .examples-menu {
+    @apply fixed inset-auto m-0 w-md max-w-[calc(100vw-12px)] overflow-y-auto rounded-md border border-line-strong bg-surface-1 p-1 font-sans text-sm text-fg shadow-lg;
+  }
+
+  .examples-menu-item {
+    @apply flex w-full gap-2 rounded px-2 py-1.5 text-left hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:outline-1 focus-visible:outline-line-strong;
+  }
+
   .term-tooltip:popover-open {
     animation: term-in 120ms ease-out;
   }
@@ -148,6 +157,15 @@
 @media (prefers-reduced-motion: reduce) {
   .slot-read,
   .slot-hit,
+  /* The editor toolbar's Examples menu (src/editor/ExamplesMenu.tsx): a popover in the top layer, placed under its button. */
+  .examples-menu {
+    @apply fixed inset-auto m-0 w-md max-w-[calc(100vw-12px)] overflow-y-auto rounded-md border border-line-strong bg-surface-1 p-1 font-sans text-sm text-fg shadow-lg;
+  }
+
+  .examples-menu-item {
+    @apply flex w-full gap-2 rounded px-2 py-1.5 text-left hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:outline-1 focus-visible:outline-line-strong;
+  }
+
   .term-tooltip:popover-open {
     animation: none;
   }

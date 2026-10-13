@@ -1,4 +1,5 @@
 import { expect, type Page } from '@playwright/test'
+import type { Example } from '../src/examples'
 import { treeItem } from './schemaTree'
 
 /** Opens the app and waits until Postgres is ready and the sample data is loaded. */
@@ -50,4 +51,29 @@ export function statusLines(page: Page) {
 /** The headings of the plan tree's nodes, outermost first. */
 export function planNodes(page: Page) {
   return page.getByTestId('plan-node')
+}
+
+/** Opens the Examples menu with the mouse and chooses an example, which loads it into the editor. */
+export async function chooseExample(page: Page, example: Example) {
+  await page.getByRole('button', { name: 'Examples' }).click()
+  await page.getByRole('menuitem', { name: `${example.number}. ${example.title}`, exact: true }).click()
+  await expect(editorContent(page)).toContainText(`-- Example ${example.number}: ${example.title}`)
+}
+
+/**
+ * Runs one step of the example loaded in the editor, as a visitor would:
+ * click in its statement, then Cmd/Ctrl+Enter. Earlier steps with the same
+ * SQL are skipped over.
+ */
+export async function runExampleStep(page: Page, example: Example, index: number) {
+  const { sql } = example.steps[index]
+  const sameBefore = example.steps.slice(0, index).filter((step) => step.sql === sql).length
+  await waitForRunToFinish(page)
+  await editorContent(page).locator('.cm-line', { hasText: `${sql};` }).nth(sameBefore).click()
+  await page.keyboard.press('ControlOrMeta+Enter')
+}
+
+/** "1 row", "1,001 rows": how the app counts rows. */
+export function rowCount(rows: number) {
+  return rows === 1 ? '1 row' : `${rows.toLocaleString('en-US')} rows`
 }

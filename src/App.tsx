@@ -8,7 +8,9 @@ import { loadCatalog, postgresVersion, type DatabaseInfo } from './db/catalog'
 import { connectToDatabase } from './db/client'
 import { inTransaction, runAll, runStatementAt, type RowsResult, type StatementResult } from './db/runner'
 import { SEED_VERSION, readSeedInfo, resetDatabase, type SeedInfo } from './db/seed'
-import { SqlEditor, selectInEditor, type RunMode } from './editor/SqlEditor'
+import { ExamplesMenu } from './editor/ExamplesMenu'
+import { SqlEditor, replaceEditorText, selectInEditor, type RunMode } from './editor/SqlEditor'
+import { exampleText, type Example } from './examples'
 import { Term } from './glossary/Term'
 import { APP_NAME, Header } from './layout/Header'
 import { Workspace } from './layout/Workspace'
@@ -68,7 +70,7 @@ const EMPTY_CACHE_KEY = 'empty-cache'
 const SHOW_INTERNALS_KEY = 'show-internals'
 
 const STARTING_SQL = `-- Press Cmd/Ctrl+Enter to run the statement under the cursor,
--- or Shift+Cmd/Ctrl+Enter to run them all.
+-- or Shift+Cmd/Ctrl+Enter to run them all. Examples has ready-made ones.
 
 SELECT * FROM orders WHERE id = 4242;
 
@@ -193,6 +195,14 @@ export default function App() {
     )
   }
 
+  /** Loads an example into the editor, replacing its text (Cmd/Ctrl+Z brings it back); it runs when the visitor presses Run. */
+  function loadExample(example: Example) {
+    const view = editorView.current
+    if (view === null) return
+    const { text, cursor } = exampleText(example)
+    replaceEditorText(view, text, cursor)
+  }
+
   function showPosition(position: number) {
     if (editorView.current) selectInEditor(editorView.current, position)
   }
@@ -262,7 +272,7 @@ export default function App() {
             <>
               <button
                 type="button"
-                className="btn text-xs"
+                className="btn text-xs whitespace-nowrap"
                 onClick={() => runSql('statement')}
                 disabled={!canRun}
                 title={`Run the statement under the cursor (${MOD_KEY}Enter)`}
@@ -271,14 +281,15 @@ export default function App() {
               </button>
               <button
                 type="button"
-                className="btn text-xs"
+                className="btn text-xs whitespace-nowrap"
                 onClick={() => runSql('all')}
                 disabled={!canRun}
                 title={`Run every statement, in order (Shift+${MOD_KEY}Enter)`}
               >
                 Run all
               </button>
-              <button type="button" className="btn text-xs" onClick={reset} disabled={state.status !== 'ready'}>
+              <ExamplesMenu onChoose={loadExample} />
+              <button type="button" className="btn text-xs whitespace-nowrap" onClick={reset} disabled={state.status !== 'ready'}>
                 Reset database
               </button>
               {/* The checkboxes say what the setting does; the terms in their labels say what the words mean. */}
