@@ -1,16 +1,19 @@
 import type { PGliteInterface } from '@electric-sql/pglite'
+import { linePointer } from '../replay/heapInternals'
 import { canReadKeys, readKey } from '../replay/indexKeys'
+import type { LinePointer, VisibilityBits } from '../replay/trace'
 import {
   findRelations,
   readBtreeMeta,
   readBtreePages,
+  readHeapPageHeaders,
   readHeapPages,
   readIndexColumns,
+  readVisibilityMap,
   restoreCache,
   snapshotCache,
   type BtreePage,
   type CacheSnapshot,
-  type HeapItem,
   type Relation,
   type Tid,
 } from './inspector'
@@ -38,15 +41,15 @@ export interface TablePageView {
   block: number
   /** The table's columns, in order. */
   columns: string[]
+  /** The page header's free space bounds (pd_lower, pd_upper); null when the table has no pages. */
+  header: { lower: number; upper: number } | null
+  /** The page's bits in the visibility map; null when the map doesn't cover it (no map yet, or the page is newer). */
+  visibility: VisibilityBits | null
   items: TablePageItem[]
 }
 
-export interface TablePageItem {
-  /** The line pointer's number: the second part of the row's ctid. */
-  offset: number
-  state: HeapItem['state']
-  /** For a redirect, the line pointer it redirects to. */
-  redirectTo: number | null
+/** A line pointer, its tuple's header (for Show internals), and the row's values. */
+export interface TablePageItem extends LinePointer {
   /**
    * The row's values as Postgres writes them (null for NULL), one per column;
    * null when the visitor's session can't see this row version (deleted,
@@ -67,6 +70,12 @@ export interface IndexPageView {
   page: Omit<BtreePage, 'items'>
   /** Why the keys can't be read, if they can't (the items then carry their bytes); null when they can. */
   unreadableKeys: string | null
+  /**
+   * The page's high key: the upper bound of the keys on it, in as many
+   * columns as it keeps (key null when the keys can't be read). Null on the
+   * rightmost page of a level, which has none.
+   */
+  highKey: { key: (string | null)[] | null; keyBytes: string } | null
   /** The page's downlinks or entries, in order (the high key apart). */
   items: IndexPageItem[]
 }
@@ -96,7 +105,7 @@ export async function readTablePage(db: PGliteInterface, table: TableName, block
   return withoutSideEffects(db, table, async (relations) => {
     const heap = relations[0]
     const columns = await columnsOf(db, heap)
-    if (heap.pages === 0) return { kind: 'table', table: heap, block: 0, columns, items: [] }
+    if (heap.pages === 0) return { kind: 'table', table: heap, block: 0, columns, header: null, visibility: null, items: [] }
     const shown = Math.min(Math.max(0, block), heap.pages - 1)
     // The rows the session can see, read first: reading them can prune the
     // page (remove row versions no one can see), so the line pointers read
@@ -109,17 +118,17 @@ export async function readTablePage(db: PGliteInterface, table: TableName, block
     `)
     const rows = new Map(visible.rows.map((row) => [row.offset, row.values]))
     const [page] = await readHeapPages(db, heap, [shown])
+    const [header] = await readHeapPageHeaders(db, heap, [shown])
+    const map = await readVisibilityMap(db, heap, [shown])
+    const inMap = Math.floor(shown / map.heapPagesPerMapPage) < map.pages
     return {
       kind: 'table',
       table: heap,
       block: shown,
       columns,
-      items: page.items.map((item) => ({
-        offset: item.offset,
-        state: item.state,
-        redirectTo: item.redirectTo,
-        values: rows.get(item.offset) ?? null,
-      })),
+      header: { lower: header.lower, upper: header.upper },
+      visibility: inMap ? { allVisible: map.allVisible.has(shown), allFrozen: map.allFrozen.has(shown) } : null,
+      items: page.items.map((item) => ({ ...linePointer(item), values: rows.get(item.offset) ?? null })),
     }
   })
 }
@@ -147,16 +156,19 @@ export async function readIndexPage(
     const [page] = await readBtreePages(db, index, [shown])
     const columns = (await readIndexColumns(db, index)).filter((column) => column.isKey)
     const items = page.items.filter((item) => item.role !== 'highKey')
+    const highKey = page.items.find((item) => item.role === 'highKey') ?? null
+    // The high key's key is printed with the others, last.
+    const withKeys = highKey === null ? items : [...items, highKey]
 
     const unreadable = columns.find((column) => !canReadKeys(column.type))
     let unreadableKeys = unreadable ? `Keys of type ${unreadable.type} can’t be read yet, so their bytes are shown.` : null
-    let keys: ((string | null)[] | null)[] = items.map(() => null)
+    let keys: ((string | null)[] | null)[] = withKeys.map(() => null)
     if (unreadableKeys === null) {
       try {
         keys = await printKeys(
           db,
           columns.map((column) => column.type),
-          items.map((item) => readKey(item.keyBytes, item.hasNulls, columns, item.keyColumns ?? columns.length)),
+          withKeys.map((item) => readKey(item.keyBytes, item.hasNulls, columns, item.keyColumns ?? columns.length)),
         )
       } catch (error) {
         // readKey can't read every key yet (e.g. NULL in some columns only).
@@ -180,6 +192,7 @@ export async function readIndexPage(
         next: page.next,
       },
       unreadableKeys,
+      highKey: highKey === null ? null : { key: keys[items.length], keyBytes: highKey.keyBytes },
       items: items.map((item, i) => ({
         offset: item.offset,
         role: item.role === 'downlink' ? 'downlink' : 'entry',

@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import type { IndexPageItem, IndexPageView, TablePageItem, TablePageView } from '../db/pageBrowser'
+import { LinePointerText, PageHeaderText, VisibilityText } from './Internals'
 import type { PageTarget, PageViewData, PageViewState } from './usePageView'
 
 const integer = new Intl.NumberFormat('en-US')
@@ -16,6 +17,8 @@ interface PageBrowserProps {
   onOpen: (target: PageTarget) => void
   /** Goes back to the last run's animation; null when there's none. */
   onBackToAnimation: (() => void) | null
+  /** Show internals: line pointers, tuple headers and visibility map bits on a table page, the high key on an index page. */
+  internals: boolean
 }
 
 /**
@@ -25,7 +28,7 @@ interface PageBrowserProps {
  * index's page lists its downlinks or entries, which lead to the pages and
  * rows they point at.
  */
-export function PageBrowser({ target, state, onOpen, onBackToAnimation }: PageBrowserProps) {
+export function PageBrowser({ target, state, onOpen, onBackToAnimation, internals }: PageBrowserProps) {
   const view = state.status === 'error' ? null : state.view
   // While the next page loads, the last one stays, unless it was another relation's.
   const shown = view !== null && sameRelation(view, target) ? view : null
@@ -45,9 +48,9 @@ export function PageBrowser({ target, state, onOpen, onBackToAnimation }: PageBr
       ) : shown === null ? (
         <p className="p-3 text-fg-muted">Reading the page…</p>
       ) : shown.kind === 'table' && target.kind === 'table' ? (
-        <TablePage view={shown} target={target} onOpen={onOpen} />
+        <TablePage view={shown} target={target} onOpen={onOpen} internals={internals} />
       ) : shown.kind === 'index' && target.kind === 'index' ? (
-        <IndexPage view={shown} target={target} onOpen={onOpen} />
+        <IndexPage view={shown} target={target} onOpen={onOpen} internals={internals} />
       ) : null}
     </div>
   )
@@ -71,7 +74,17 @@ function Header({ title, children }: { title: ReactNode; children?: ReactNode })
 
 /* ---------------------------------------------------------------- tables */
 
-function TablePage({ view, target, onOpen }: { view: TablePageView; target: Extract<PageTarget, { kind: 'table' }>; onOpen: (target: PageTarget) => void }) {
+function TablePage({
+  view,
+  target,
+  onOpen,
+  internals,
+}: {
+  view: TablePageView
+  target: Extract<PageTarget, { kind: 'table' }>
+  onOpen: (target: PageTarget) => void
+  internals: boolean
+}) {
   const pages = view.table.pages
   const open = (block: number) => onOpen({ ...target, block, highlight: null })
   const visible = view.items.filter((item) => item.values !== null).length
@@ -116,10 +129,18 @@ function TablePage({ view, target, onOpen }: { view: TablePageView; target: Extr
               {integer.format(visible)} {visible === 1 ? 'row' : 'rows'} visible to this session
             </span>
           </p>
+          {internals && (
+            <p className="font-mono text-fg-muted" data-testid="page-internals">
+              {view.header && <PageHeaderText lower={view.header.lower} upper={view.header.upper} linePointers={null} />}
+              <br />
+              <VisibilityText bits={view.visibility} />
+            </p>
+          )}
           <table className="w-max font-mono">
             <thead className="text-left text-fg-muted">
               <tr>
                 <th className="pr-3 font-normal">ctid</th>
+                {internals && <th className="pr-3 font-normal">line pointer · tuple header</th>}
                 {view.columns.map((column) => (
                   <th key={column} className="pr-3 font-normal">
                     {column}
@@ -134,6 +155,7 @@ function TablePage({ view, target, onOpen }: { view: TablePageView; target: Extr
                   item={item}
                   block={view.block}
                   columns={view.columns.length}
+                  internals={internals}
                   highlighted={item.offset === target.highlight && view.block === target.block}
                 />
               ))}
@@ -153,7 +175,19 @@ const NO_ROW: Record<TablePageItem['state'], string> = {
   redirect: 'redirect',
 }
 
-function LinePointerRow({ item, block, columns, highlighted }: { item: TablePageItem; block: number; columns: number; highlighted: boolean }) {
+function LinePointerRow({
+  item,
+  block,
+  columns,
+  internals,
+  highlighted,
+}: {
+  item: TablePageItem
+  block: number
+  columns: number
+  internals: boolean
+  highlighted: boolean
+}) {
   return (
     <tr
       className={`${highlighted ? 'bg-heap/20' : ''} ${item.values === null ? 'text-fg-muted' : ''}`}
@@ -167,6 +201,11 @@ function LinePointerRow({ item, block, columns, highlighted }: { item: TablePage
       <td className="pr-3 text-heap">
         ({block},{item.offset})
       </td>
+      {internals && (
+        <td className="pr-3 whitespace-nowrap">
+          <LinePointerText lp={item} />
+        </td>
+      )}
       {item.values === null ? (
         <td colSpan={Math.max(1, columns)} className="pr-3 italic">
           {item.state === 'redirect' ? `redirect → (${block},${item.redirectTo}), a newer version of the row` : NO_ROW[item.state]}
@@ -232,7 +271,17 @@ function MiniMap({ pages, current, onOpen }: { pages: number; current: number; o
 
 /* --------------------------------------------------------------- indexes */
 
-function IndexPage({ view, target, onOpen }: { view: IndexPageView; target: Extract<PageTarget, { kind: 'index' }>; onOpen: (target: PageTarget) => void }) {
+function IndexPage({
+  view,
+  target,
+  onOpen,
+  internals,
+}: {
+  view: IndexPageView
+  target: Extract<PageTarget, { kind: 'index' }>
+  onOpen: (target: PageTarget) => void
+  internals: boolean
+}) {
   const page = view.page
   /** Opens another page of the index, remembering this one for Back. */
   const open = (block: number) => onOpen({ ...target, block, history: [...target.history, page.block] })
@@ -292,6 +341,13 @@ function IndexPage({ view, target, onOpen }: { view: IndexPageView; target: Extr
           </span>
         </p>
         {view.unreadableKeys && <p className="text-fg-muted">{view.unreadableKeys}</p>}
+        {internals && (
+          <p className="font-mono text-fg-muted" data-testid="page-high-key">
+            {view.highKey === null
+              ? 'no high key: the rightmost page on its level has no upper bound'
+              : `high key (item 1): ${keyText(view.highKey, view.keyColumns.length)}, the upper bound of the keys on this page`}
+          </p>
+        )}
         <p className="text-fg-muted">
           {page.isLeaf
             ? 'Each entry is a key and the heap row it points at; click a row to open its heap page.'
@@ -356,7 +412,7 @@ function IndexItemRow({
  * the columns a downlink dropped (all of them for a page's first downlink).
  * When the keys can't be read, their bytes.
  */
-export function keyText(item: IndexPageItem, keyColumns: number): string {
+export function keyText(item: Pick<IndexPageItem, 'key' | 'keyBytes'>, keyColumns: number): string {
   if (item.key === null) return item.keyBytes === '' ? '−∞' : item.keyBytes
   const values = item.key.map((value) => value ?? 'NULL')
   while (values.length < keyColumns) values.push('−∞')

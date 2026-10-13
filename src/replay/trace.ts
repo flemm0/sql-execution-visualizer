@@ -366,6 +366,91 @@ export interface LimitContents {
   count: number | null
 }
 
+
+/*
+ * Internals: Postgres's own bookkeeping on a heap page, which the
+ * visualization shows only when "Show internals" is on (docs/UX.md). Unlike
+ * the rest of the trace, these are Postgres's terms: line pointers, tuple
+ * headers (xmin, xmax, infomask) and the visibility map.
+ */
+
+/**
+ * A line pointer: the slot on a heap page that a row's ctid names, and the
+ * tuple (row version) it points at, with its header.
+ */
+export interface LinePointer {
+  /** Its number on the page: the second part of the row's ctid. */
+  offset: number
+  /**
+   * normal: points at a tuple. unused: free. dead: its tuple was removed, but
+   * an index may still point here. redirect: points at another line pointer,
+   * where a chain of row versions on this page continues (a HOT update).
+   */
+  state: 'unused' | 'normal' | 'redirect' | 'dead'
+  /** For a redirect, the line pointer it points at. */
+  redirectTo: number | null
+  /** Where its tuple starts on the page, in bytes (lp_off); null when it points at none. */
+  tupleStart: number | null
+  /** Its tuple's length in bytes (lp_len). */
+  length: number
+  /** Its tuple's header; null when it points at no tuple. */
+  header: TupleHeader | null
+}
+
+/** A tuple's header, as heap_page_items reads it. */
+export interface TupleHeader {
+  /** The transaction that created this row version. */
+  xmin: number
+  /** The transaction that deleted or updated it, or locked it; 0 if none. */
+  xmax: number
+  /** The row version's own place, or after an UPDATE, its newer version's (t_ctid). */
+  ctid: { block: number; offset: number }
+  /** Status bits (t_infomask, t_infomask2; the low 11 bits of the second are the number of columns). */
+  infomask: number
+  infomask2: number
+  /** The names of the bits set in them, as Postgres writes them (e.g. HEAP_XMIN_COMMITTED). */
+  flags: string[]
+  /** Names Postgres gives some combinations of those bits (e.g. HEAP_XMIN_FROZEN). */
+  combinedFlags: string[]
+}
+
+/** A heap page's two bits in its table's visibility map. */
+export interface VisibilityBits {
+  /** Every row on the page is visible to every transaction. */
+  allVisible: boolean
+  /** Every row on the page is frozen: VACUUM needn't look at it again. */
+  allFrozen: boolean
+}
+
+/**
+ * A heap page the trace shows, with its internals as Postgres had them just
+ * after the query ran: the query itself can set hint bits in tuple headers
+ * (e.g. HEAP_XMIN_COMMITTED) and prune row versions no one can see.
+ */
+export interface HeapPageContents {
+  relation: number
+  block: number
+  /**
+   * Its header: where the free space between the line pointers and the
+   * tuples starts and ends (pd_lower, pd_upper), and how many line pointers
+   * it has. Null when the query didn't read the page (an index-only scan
+   * found it all-visible).
+   */
+  header: { lower: number; upper: number; linePointers: number } | null
+  /** Its bits in the visibility map; null when the map doesn't cover the page (no map yet, or the page is newer). */
+  visibility: VisibilityBits | null
+  /** The line pointers of the rows the events name on this page, in order. Empty when the page wasn't read. */
+  linePointers: LinePointer[]
+  /**
+   * False when the events name rows on this page whose line pointers weren't
+   * kept: a trace keeps them for its first MAX_TRACED_ROWS rows only.
+   */
+  complete: boolean
+}
+
+/** The most rows a trace keeps line pointers and tuple headers for. */
+export const MAX_TRACED_ROWS = 2_000
+
 export interface Trace {
   relations: TraceRelation[]
   events: TraceEvent[]
@@ -375,4 +460,6 @@ export interface Trace {
   sorts: SortContents[]
   /** Each Limit in the plan. */
   limits: LimitContents[]
+  /** Every heap page the heap zone shows, with its internals, in the order first visited. */
+  heapPages: HeapPageContents[]
 }

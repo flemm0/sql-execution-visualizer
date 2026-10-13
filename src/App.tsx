@@ -63,6 +63,8 @@ const EDITOR_TEXT_KEY = 'editor-text'
 const AUTOVACUUM_KEY = 'autovacuum'
 /** Remembers whether "Start with an empty cache" is turned off ('off'); on unless turned off. */
 const EMPTY_CACHE_KEY = 'empty-cache'
+/** Remembers whether Show internals is turned on ('on'); off unless turned on. */
+const SHOW_INTERNALS_KEY = 'show-internals'
 
 const STARTING_SQL = `-- Press Cmd/Ctrl+Enter to run the statement under the cursor,
 -- or Shift+Cmd/Ctrl+Enter to run them all.
@@ -85,6 +87,7 @@ export default function App() {
   const [tidyingUp, setTidyingUp] = useState(false)
   const [autovacuumOn, setAutovacuumOn] = useState(() => readSetting(AUTOVACUUM_KEY) !== 'off')
   const [emptyCacheOn, setEmptyCacheOn] = useState(() => readSetting(EMPTY_CACHE_KEY) !== 'off')
+  const [showInternals, setShowInternals] = useState(() => readSetting(SHOW_INTERNALS_KEY) === 'on')
   const [notices, setNotices] = useState<AutovacuumNotice[]>([])
   const nextNoticeId = useRef(1)
   const nextRunId = useRef(1)
@@ -171,6 +174,11 @@ export default function App() {
   function toggleEmptyCache(on: boolean) {
     setEmptyCacheOn(on)
     saveSetting(EMPTY_CACHE_KEY, on ? 'on' : 'off')
+  }
+
+  function toggleInternals(on: boolean) {
+    setShowInternals(on)
+    saveSetting(SHOW_INTERNALS_KEY, on ? 'on' : 'off')
   }
 
   /** Opens a table's first page or an index's root, from the schema browser; the animation pauses meanwhile. */
@@ -311,6 +319,7 @@ export default function App() {
                 state={pages.state}
                 onOpen={setPageTarget}
                 onBackToAnimation={trace ? () => setPageTarget(null) : null}
+                internals={showInternals}
               />
             ) : run.status === 'done' && lastQuery?.plan && lastQuery.replay?.status === 'replayed' ? (
               <Visualization
@@ -319,10 +328,20 @@ export default function App() {
                 trace={lastQuery.replay.trace}
                 validation={lastQuery.replay.validation}
                 player={player}
+                internals={showInternals}
               />
             ) : (
               <Placeholder>{visualizationPlaceholder(run, lastQuery)}</Placeholder>
             )
+          }
+          visualizationToolbar={
+            <label
+              className="flex items-center gap-1.5 text-xs text-fg-muted"
+              title="Also show Postgres's bookkeeping, as it read it: line pointers and tuple headers (xmin, xmax, infomask) on heap pages, visibility map bits, and each B-tree page's high key."
+            >
+              <input type="checkbox" checked={showInternals} onChange={(event) => toggleInternals(event.target.checked)} />
+              Show internals
+            </label>
           }
           results={
             run.status === 'done' && run.results.length > 0 ? (

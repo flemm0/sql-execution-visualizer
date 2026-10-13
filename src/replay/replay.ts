@@ -5,6 +5,7 @@ import { query, queryText } from '../db/query'
 import { quoteIdentifier } from '../db/sql'
 import { replayBitmapScan } from './bitmapScan'
 import { SharedBuffers } from './buffers'
+import { readHeapInternals } from './heapInternals'
 import { entryTids, replayIndexScan, walkIndexScan, type IndexWalk } from './indexScan'
 import { childRowsNeeded, limitEvents } from './limit'
 import { readLimits, type LimitSettings } from './limits'
@@ -203,6 +204,7 @@ export async function replayQuery(db: PGliteInterface, input: ReplayInput): Prom
       indexPages: replayer.indexPages,
       sorts: replayer.sorts,
       limits: [...limits].map(([node, { offset, count }]) => ({ node, offset, count })),
+      heapPages: await readHeapInternals(db, found.table, events),
     }
 
     const notes = [...replayer.notes]

@@ -40,7 +40,8 @@ const AROUND = 3
 export type Mark = 'followed' | 'current' | 'matched' | 'markedDead' | 'dead'
 
 export interface Cell {
-  kind: 'key' | 'gap' | 'ellipsis'
+  /** highKey: the page's high key, at its right end, drawn only with Show internals. */
+  kind: 'key' | 'gap' | 'ellipsis' | 'highKey'
   /** Left edge, relative to the page. */
   x: number
   width: number
@@ -118,6 +119,8 @@ export interface LayoutInput {
   currentEntry: number | null
   /** The width there is to draw in. */
   width: number
+  /** Show internals: draw each page's high key at its right end. */
+  highKeys?: boolean
 }
 
 const integer = new Intl.NumberFormat('en-US')
@@ -309,7 +312,13 @@ function pagesText(count: number) {
 
 /** A page drawn in full: its keys around the one in focus, as many as fit in `budget`. */
 function fullPage(contents: IndexPageContents, step: PathStep, input: LayoutInput, budget: number): PageShape {
-  const cells = contents.level === 0 ? leafCells(contents, input, budget) : innerCells(contents, step, input, budget)
+  const highKey = input.highKeys ? highKeyCell(contents, input.keyColumns) : null
+  const room = budget - (highKey?.width ?? 0)
+  const cells = contents.level === 0 ? leafCells(contents, input, room) : innerCells(contents, step, input, room)
+  if (highKey) {
+    const end = cells.reduce((sum, cell) => sum + cell.width, 0)
+    cells.push({ ...highKey, x: end })
+  }
   return {
     block: contents.block,
     x: 0,
@@ -445,6 +454,20 @@ function keyCell(key: (string | null)[], keyColumns: number, mark: Mark | null, 
   return { kind: 'key', width: textWidth(text), text, title: text === full ? null : full, mark, offset }
 }
 
+/**
+ * The page's high key, the upper bound of its keys: "HK 4300". The rightmost
+ * page of a level has none, so no upper bound: "HK +∞".
+ */
+function highKeyCell(contents: IndexPageContents, keyColumns: number): Omit<Cell, 'x'> {
+  if (contents.highKey === null) {
+    const text = 'HK +∞'
+    return { kind: 'highKey', width: textWidth(text), text, title: 'No high key: the rightmost page on its level has no upper bound', mark: null, offset: null }
+  }
+  const full = formatIndexKey(contents.highKey, keyColumns)
+  const text = `HK ${short(full)}`
+  return { kind: 'highKey', width: textWidth(text), text, title: `High key ${full}: every key on this page sorts at or below it`, mark: null, offset: 1 }
+}
+
 function ellipsis(hidden: number): Omit<Cell, 'x'> {
   const text = hidden > 0 ? `…${integer.format(hidden)}…` : '…'
   return { kind: 'ellipsis', width: textWidth(text), text, title: hidden > 0 ? `${integer.format(hidden)} more` : null, mark: null, offset: null }
@@ -459,14 +482,14 @@ function followedGapCenter(shape: PageShape): number {
 /** Where the pointers to the children left of the followed one start: the gap before it, or the "…" for the ones not shown. */
 function gapCenterBefore(shape: PageShape): number {
   const index = shape.cells.findIndex((cell) => cell.mark === 'followed')
-  const before = shape.cells.slice(0, Math.max(0, index)).reverse().find((cell) => cell.kind !== 'key')
+  const before = shape.cells.slice(0, Math.max(0, index)).reverse().find((cell) => cell.kind === 'gap' || cell.kind === 'ellipsis')
   return before ? before.x + before.width / 2 : 0
 }
 
 /** Where the pointers to the children right of the followed one start. */
 function gapCenterAfter(shape: PageShape): number {
   const index = shape.cells.findIndex((cell) => cell.mark === 'followed')
-  const after = shape.cells.slice(index + 1).find((cell) => cell.kind !== 'key')
+  const after = shape.cells.slice(index + 1).find((cell) => cell.kind === 'gap' || cell.kind === 'ellipsis')
   return after ? after.x + after.width / 2 : shape.width
 }
 
