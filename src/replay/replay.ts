@@ -60,7 +60,7 @@ export interface WalkedIndex {
 }
 
 /** Node types the replay engine can replay. */
-const REPLAYABLE = new Set(['Seq Scan', 'Index Scan', 'Index Only Scan', 'Bitmap Heap Scan', 'Bitmap Index Scan', 'Sort', 'Limit'])
+export const REPLAYABLE = new Set(['Seq Scan', 'Index Scan', 'Index Only Scan', 'Bitmap Heap Scan', 'Bitmap Index Scan', 'Sort', 'Limit'])
 
 /** Node types that read a B-tree index and fetch the rows its entries point at. */
 const INDEX_SCANS = new Set(['Index Scan', 'Index Only Scan'])

@@ -3,7 +3,7 @@ import { EXAMPLES } from '../src/examples'
 import { editorContent, openApp, setEditorText } from './editor'
 
 /*
- * The Examples menu in the editor toolbar (docs/UX.md#running-statements, ADR 0040).
+ * The Examples menu in the editor toolbar (docs/UX.md#running-statements, ADR 0041).
  * Every example running end to end, from the menu, is in exit-criteria.spec.ts.
  */
 

@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import type { IndexPageItem, IndexPageView, TablePageItem, TablePageView } from '../db/pageBrowser'
+import { Term } from '../glossary/Term'
 import { LinePointerText, PageHeaderText, VisibilityText } from './Internals'
 import type { PageTarget, PageViewData, PageViewState } from './usePageView'
 
@@ -100,7 +101,7 @@ function TablePage({
               ◀
             </button>
             <label className="flex items-center gap-1 text-fg-muted">
-              heap page
+              <Term term="page">heap page</Term>
               <PageNumberInput block={view.block} last={pages - 1} onChange={open} />
               / {integer.format(pages - 1)}
             </label>
@@ -125,8 +126,9 @@ function TablePage({
             <span className="font-mono text-heap">heap page {integer.format(view.block)}</span>
             <span className="text-fg-muted">
               {' '}
-              · {integer.format(view.items.length)} line {view.items.length === 1 ? 'pointer' : 'pointers'} ·{' '}
-              {integer.format(visible)} {visible === 1 ? 'row' : 'rows'} visible to this session
+              · {integer.format(view.items.length)}{' '}
+              <Term term="line pointer">line {view.items.length === 1 ? 'pointer' : 'pointers'}</Term> ·{' '}
+              {integer.format(visible)} {visible === 1 ? 'row' : 'rows'} <Term term="visible" /> to this session
             </span>
           </p>
           {internals && (
@@ -139,7 +141,9 @@ function TablePage({
           <table className="w-max font-mono">
             <thead className="text-left text-fg-muted">
               <tr>
-                <th className="pr-3 font-normal">ctid</th>
+                <th className="pr-3 font-normal">
+                  <Term term="ctid" />
+                </th>
                 {internals && <th className="pr-3 font-normal">line pointer · tuple header</th>}
                 {view.columns.map((column) => (
                   <th key={column} className="pr-3 font-normal">
@@ -286,7 +290,13 @@ function IndexPage({
   /** Opens another page of the index, remembering this one for Back. */
   const open = (block: number) => onOpen({ ...target, block, history: [...target.history, page.block] })
   const back = target.history.at(-1)
-  const kind = page.isLeaf ? 'leaf' : page.isRoot ? 'root' : `level ${page.level}`
+  const kind = page.isLeaf ? (
+    <Term term="leaf" />
+  ) : page.isRoot ? (
+    <Term term="root" />
+  ) : (
+    <Term term="internal page">level {page.level}</Term>
+  )
   const count = view.items.length
   return (
     <>
@@ -334,7 +344,12 @@ function IndexPage({
           </span>
           <span className="text-fg-muted">
             {' '}
-            · {integer.format(count)} {page.isLeaf ? (count === 1 ? 'entry' : 'entries') : count === 1 ? 'downlink' : 'downlinks'}
+            · {integer.format(count)}{' '}
+            {page.isLeaf ? (
+              <Term term="index entry">{count === 1 ? 'entry' : 'entries'}</Term>
+            ) : (
+              <Term term="downlink">{count === 1 ? 'downlink' : 'downlinks'}</Term>
+            )}
             {page.isIgnored && ' · deleted: searches skip this page'}
             {' · '}
             key: {view.keyColumns.join(', ')}

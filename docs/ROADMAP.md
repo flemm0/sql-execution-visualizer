@@ -30,7 +30,7 @@ Each milestone ships as one or more PRs; merging to `main` deploys. A milestone 
 **Exit:** examples 1, 2, 4 and 11 animate end-to-end and validate in tests.
 
 ### M3: rest of v1
-**Status:** in progress: Index Only Scan (example 9), Bitmap Index Scan + Bitmap Heap Scan (examples 3, 6 and 12), and Sort and Limit, with backward index scans (example 10), replay; example 5 needed neither (an Index Scan and a Seq Scan). Examples 7 and 8 replay too: example 7's expression index needed index conditions on expressions; example 8 is a bitmap scan and a Seq Scan. Show internals is in ([ADR 0039](decisions/0039-show-internals.md)). All 12 examples are in the **Examples** menu, each checked against the plan Postgres picks ([ADR 0040](decisions/0040-examples-menu.md)); the exit criteria run every one from the menu.
+**Status:** in progress: Index Only Scan (example 9), Bitmap Index Scan + Bitmap Heap Scan (examples 3, 6 and 12), and Sort and Limit, with backward index scans (example 10), replay; example 5 needed neither (an Index Scan and a Seq Scan). Examples 7 and 8 replay too: example 7's expression index needed index conditions on expressions; example 8 is a bitmap scan and a Seq Scan. Show internals is in ([ADR 0039](decisions/0039-show-internals.md)). Glossary tooltips are in ([ADR 0040](decisions/0040-glossary-tooltips.md)). All 12 examples are in the **Examples** menu, each checked against the plan Postgres picks ([ADR 0041](decisions/0041-examples-menu.md)); the exit criteria run every one from the menu.
 
 - Replay for Index Only Scan, Bitmap Index Scan + Bitmap Heap Scan, Sort, Limit.
 - Condensing with the ~30 s budget and expandable stretches; jump-to-next controls.

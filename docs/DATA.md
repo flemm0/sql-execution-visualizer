@@ -51,7 +51,7 @@ Other details: `order_date` runs evenly from 2022-01-01 to 2024-12-31; orders ha
 
 ## Example queries (v1)
 
-All single-table, matching v1 scope. They're defined in one place, `src/examples.ts`, which the **Examples** menu, the editor text, the tests and this table share ([ADR 0040](decisions/0040-examples-menu.md)). Every expected plan below is **checked**: on 2026-10-12 against Postgres 18.3 (PGlite 0.5.8), and again by `src/examples.test.ts` on every test run, on a fresh seed, with all 12 run in order, in reverse and in order again. `e2e/exit-criteria.spec.ts` picks each one from the menu and plays it to the end. "Heap pages" are the pages a query goes through (read, or found in shared buffers).
+All single-table, matching v1 scope. They're defined in one place, `src/examples.ts`, which the **Examples** menu, the editor text, the tests and this table share ([ADR 0041](decisions/0041-examples-menu.md)). Every expected plan below is **checked**: on 2026-10-12 against Postgres 18.3 (PGlite 0.5.8), and again by `src/examples.test.ts` on every test run, on a fresh seed, with all 12 run in order, in reverse and in order again. `e2e/exit-criteria.spec.ts` picks each one from the menu and plays it to the end. "Heap pages" are the pages a query goes through (read, or found in shared buffers).
 
 Examples that add an index drop it again at the end, and examples 3 and 7 start by dropping it if an earlier run left it behind, so each can be repeated and in any order. The plans assume the starting indexes and data; the visitor's own changes can change them, which the editor text says, pointing to **Reset database**.
 

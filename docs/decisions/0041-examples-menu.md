@@ -1,4 +1,4 @@
-# 0040: The Examples menu: what picking an example does
+# 0041: The Examples menu: what picking an example does
 
 - **Status:** Accepted
 - **Date:** 2026-10-12

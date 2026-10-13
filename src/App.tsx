@@ -11,6 +11,7 @@ import { SEED_VERSION, readSeedInfo, resetDatabase, type SeedInfo } from './db/s
 import { ExamplesMenu } from './editor/ExamplesMenu'
 import { SqlEditor, replaceEditorText, selectInEditor, type RunMode } from './editor/SqlEditor'
 import { EXAMPLES, exampleEditorText, type Example } from './examples'
+import { Term } from './glossary/Term'
 import { APP_NAME, Header } from './layout/Header'
 import { Workspace } from './layout/Workspace'
 import { PlanTree } from './plan/PlanTree'
@@ -198,7 +199,7 @@ export default function App() {
     if (editorView.current) selectInEditor(editorView.current, position)
   }
 
-  /** Puts an example into the editor, replacing its text (undoable), ready for Run; nothing runs yet (ADR 0040). */
+  /** Puts an example into the editor, replacing its text (undoable), ready for Run; nothing runs yet (ADR 0041). */
   function loadExample(example: Example) {
     const view = editorView.current
     if (view === null) return
@@ -291,19 +292,24 @@ export default function App() {
               <button type="button" className="btn text-xs" onClick={reset} disabled={state.status !== 'ready'}>
                 Reset database
               </button>
-              <label
-                className="ml-2 flex items-center gap-1.5 text-xs text-fg-muted"
-                title="After each run, vacuum and analyze the tables that crossed Postgres's autovacuum thresholds, as a real server would within a minute. Turn off to study stale statistics."
-              >
-                <input type="checkbox" checked={autovacuumOn} onChange={(event) => toggleAutovacuum(event.target.checked)} />
-                Autovacuum
+              {/* The checkboxes say what the setting does; the terms in their labels say what the words mean. */}
+              <label className="ml-2 flex items-center gap-1.5 text-xs text-fg-muted">
+                <input
+                  type="checkbox"
+                  checked={autovacuumOn}
+                  onChange={(event) => toggleAutovacuum(event.target.checked)}
+                  title="After each run, vacuum and analyze the tables that crossed Postgres's autovacuum thresholds, as a real server would within a minute. Turn off to study stale statistics."
+                />
+                <Term term="autovacuum">Autovacuum</Term>
               </label>
-              <label
-                className="flex items-center gap-1.5 text-xs text-fg-muted"
-                title="Before each query, remove its tables' and indexes' pages from shared buffers, so every page it needs is read from disk. Turn off and run again to see buffer hits."
-              >
-                <input type="checkbox" checked={emptyCacheOn} onChange={(event) => toggleEmptyCache(event.target.checked)} />
-                Empty cache
+              <label className="flex items-center gap-1.5 text-xs text-fg-muted">
+                <input
+                  type="checkbox"
+                  checked={emptyCacheOn}
+                  onChange={(event) => toggleEmptyCache(event.target.checked)}
+                  title="Before each query, remove its tables' and indexes' pages from shared buffers, so every page it needs is read from disk. Turn off and run again to see buffer hits."
+                />
+                Empty <Term term="shared buffers">cache</Term>
               </label>
             </>
           }

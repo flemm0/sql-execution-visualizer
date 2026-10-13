@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { rows } from '../autovacuum/describe'
 import type { TableInfo } from '../db/catalog'
+import { Term } from '../glossary/Term'
 import type { CatalogObject } from './tree'
 
 interface DetailsPanelProps {
@@ -40,8 +41,20 @@ function Details({ object, autovacuumOn }: DetailsPanelProps & { object: Catalog
       const table = object.table
       return (
         <Facts kind="Table" name={`${table.schema}.${table.name}`}>
-          <Fact label="Rows (planner estimate)">{formatRows(table.estimatedRows)}</Fact>
-          <Fact label="Heap pages">{table.pages.toLocaleString()}</Fact>
+          <Fact
+            label={
+              <>
+                Rows (<Term term="estimated rows">planner estimate</Term>)
+              </>
+            }
+          >{formatRows(table.estimatedRows)}</Fact>
+          <Fact
+            label={
+              <>
+                <Term term="heap">Heap</Term> pages
+              </>
+            }
+          >{table.pages.toLocaleString()}</Fact>
           <Fact label="Size on disk">{formatBytes(table.sizeBytes)}</Fact>
           <Fact label="Columns">{table.columns.length}</Fact>
           <Fact label="Indexes">{table.indexes.length}</Fact>
@@ -65,7 +78,17 @@ function Details({ object, autovacuumOn }: DetailsPanelProps & { object: Catalog
         <Facts kind="Index" name={index.name}>
           <Fact label="On table">{object.table.name}</Fact>
           <Fact label="Kind">{index.primaryKey ? 'primary key' : index.unique ? 'unique' : 'non-unique'}</Fact>
-          {index.levels !== null && <Fact label="B-tree levels">{index.levels}</Fact>}
+          {index.levels !== null && (
+            <Fact
+              label={
+                <>
+                  <Term term="B-tree" /> levels
+                </>
+              }
+            >
+              {index.levels}
+            </Fact>
+          )}
           <Fact label="Index pages">{index.pages.toLocaleString()}</Fact>
           <Fact label="Definition">{index.definition}</Fact>
         </Facts>
@@ -89,15 +112,27 @@ function AutovacuumFacts({ table, autovacuumOn }: { table: TableInfo; autovacuum
   return (
     <>
       <dt className="col-span-2 mt-2 text-fg-muted uppercase tracking-wide" data-testid="autovacuum-facts">
-        Autovacuum
+        <Term term="autovacuum">Autovacuum</Term>
       </dt>
       <Fact label="Status">{status}</Fact>
-      <Fact label="Last vacuum">{formatWhen(activity.lastVacuum)}</Fact>
-      <Fact label="Last analyze">{formatWhen(activity.lastAnalyze)}</Fact>
+      <Fact
+        label={
+          <>
+            Last <Term term="VACUUM">vacuum</Term>
+          </>
+        }
+      >{formatWhen(activity.lastVacuum)}</Fact>
+      <Fact
+        label={
+          <>
+            Last <Term term="ANALYZE">analyze</Term>
+          </>
+        }
+      >{formatWhen(activity.lastAnalyze)}</Fact>
       <Fact label="Changed since analyze">
         {rows(assessment.changedRows.count)}; analyzes above {assessment.changedRows.threshold.toLocaleString()}
       </Fact>
-      <Fact label="Dead rows">
+      <Fact label={<Term term="dead row">Dead rows</Term>}>
         {rows(assessment.deadRows.count)}; vacuums above {assessment.deadRows.threshold.toLocaleString()}
       </Fact>
       <Fact label="Inserted since vacuum">
@@ -125,7 +160,7 @@ function Facts({ kind, name, children }: { kind: string; name: string; children:
   )
 }
 
-function Fact({ label, children }: { label: string; children: ReactNode }) {
+function Fact({ label, children }: { label: ReactNode; children: ReactNode }) {
   return (
     <>
       <dt className="whitespace-nowrap text-fg-muted">{label}</dt>
