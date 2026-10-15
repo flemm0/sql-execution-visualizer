@@ -1,15 +1,24 @@
+import { useMemo } from 'react'
+import { nextEvent, type JumpTarget } from '../player/jump'
 import { SPEEDS, type Player, type Speed } from '../player/usePlayer'
+import type { Trace } from '../replay/trace'
 
 const integer = new Intl.NumberFormat('en-US')
 
 /**
  * The player's controls (docs/UX.md#playback): to the start, step back,
  * play/pause, step forward, to the end, a timeline scrubber, the speed,
- * autoplay, and which step is showing (and how many events the steps
- * condense, when stretches group them).
+ * autoplay, jumps to the next result row, page or plan node, and which
+ * step is showing (and how many events the steps condense, when stretches
+ * group them).
  */
-export function PlayerControls({ player }: { player: Player }) {
+export function PlayerControls({ player, trace }: { player: Player; trace: Trace }) {
   const { position, steps, playing } = player
+  // Where each jump would land: the next such event not yet played, or null if none is left.
+  const next = useMemo(
+    () => new Map(JUMPS.map((jump) => [jump.target, nextEvent(trace, player.events, jump.target)])),
+    [trace, player.events],
+  )
   return (
     <div
       className="flex items-center gap-2 border-t border-line px-3 py-1.5"
@@ -39,6 +48,25 @@ export function PlayerControls({ player }: { player: Player }) {
       <button type="button" className="icon-btn" onClick={() => player.seek(steps)} disabled={position === steps} aria-label="To the end">
         ⏭
       </button>
+      <span className="flex items-center gap-1 text-fg-muted" role="group" aria-label="Jump to the next">
+        Next
+        {JUMPS.map((jump) => {
+          const event = next.get(jump.target) ?? null
+          return (
+            <button
+              key={jump.target}
+              type="button"
+              className="btn text-xs"
+              onClick={() => event !== null && player.jumpToEvent(event)}
+              disabled={event === null}
+              aria-label={jump.name}
+              title={event === null ? `${jump.title} None is left.` : jump.title}
+            >
+              {jump.label}
+            </button>
+          )
+        })}
+      </span>
       <input
         type="range"
         className="min-w-24 flex-1 accent-index"
@@ -84,6 +112,13 @@ export function PlayerControls({ player }: { player: Player }) {
     </div>
   )
 }
+
+/** The jump-to-next controls, in the order they're shown. */
+const JUMPS: { target: JumpTarget; label: string; name: string; title: string }[] = [
+  { target: 'row', label: 'row', name: 'Next result row', title: 'Pause on the next row sent to the result.' },
+  { target: 'page', label: 'page', name: 'Next page', title: 'Pause on the next page asked for in shared buffers: found there, or read from disk.' },
+  { target: 'node', label: 'node', name: 'Next plan node', title: 'Pause where a plan node next starts or finishes (or a Limit stops the nodes below it).' },
+]
 
 function parseSpeed(value: string): Speed {
   return value === 'instant' ? 'instant' : Number(value)

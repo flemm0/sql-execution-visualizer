@@ -92,7 +92,7 @@ export function Visualization({ plan, trace, validation, player, internals }: Vi
         </p>
         <StretchControl player={player} />
       </div>
-      <PlayerControls player={player} />
+      <PlayerControls player={player} trace={trace} />
     </div>
   )
 }
