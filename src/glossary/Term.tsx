@@ -108,7 +108,7 @@ export function Term({ term, children }: { term: GlossaryTerm; children?: ReactN
 }
 
 /** Puts the box under the term, or over it when there's no room below, within the window. */
-function placeBelowOrAbove(box: HTMLElement, term: HTMLElement) {
+export function placeBelowOrAbove(box: HTMLElement, term: HTMLElement) {
   const at = term.getBoundingClientRect()
   const size = box.getBoundingClientRect()
   const left = Math.min(Math.max(GAP, at.left), window.innerWidth - size.width - GAP)

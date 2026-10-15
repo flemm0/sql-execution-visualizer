@@ -109,10 +109,21 @@ describe('the state at a step', () => {
       4,
     )
     expect(state).toMatchObject({ hits: 2, reads: 1 })
-    expect(state.buffers.map((slot) => [slot.page.block, slot.wasCached])).toEqual([
-      [0, true],
-      [1, false],
+    // Each slot counts its own hits and reads, for its hover text.
+    expect(state.buffers.map((slot) => [slot.page.block, slot.wasCached, slot.hits, slot.reads])).toEqual([
+      [0, true, 2, 0],
+      [1, false, 0, 1],
     ])
+    // A page read, then asked for again: one read and one hit.
+    const again = stateAt(
+      trace([
+        { type: 'buffer.read', node: 0, page: heapPage(1) },
+        { type: 'buffer.hit', node: 0, page: heapPage(1) },
+      ]),
+      nodes(),
+      2,
+    )
+    expect(again.buffers.map((slot) => [slot.wasCached, slot.hits, slot.reads])).toEqual([[false, 1, 1]])
     expect(state.caption).toBe('Heap page 1 isn’t in shared buffers, so it’s read from disk into a buffer.')
     expect(stateAt(trace([{ type: 'buffer.hit', node: 0, page: heapPage(0) }]), nodes(), 1).caption).toBe(
       'Heap page 0 is already in shared buffers: a hit, no disk read.',

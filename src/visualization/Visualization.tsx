@@ -21,7 +21,9 @@ import { allNodes, type Validation } from '../replay/validate'
 import { NodeTitle, Term } from '../glossary/Term'
 import { BtreeView } from './BtreeView'
 import { LinePointerText, PageHeaderText, VisibilityText } from './Internals'
+import { describeSlot, describeSquare, squareLabel } from './hoverInfo'
 import { PlayerControls } from './PlayerControls'
+import { useItemTips } from './useItemTips'
 
 const integer = new Intl.NumberFormat('en-US')
 
@@ -265,6 +267,7 @@ function BuffersZone({ state, relations }: { state: PlaybackState; relations: Ma
   const hidden = Math.max(0, state.buffers.length - SHOWN_SLOTS)
   const slots = state.buffers.slice(hidden)
   const cached = state.buffers.filter((slot) => slot.wasCached).length
+  const { itemProps, tip } = useItemTips(slots.length, (item) => describeSlot(slots[item], relations))
   return (
     <Zone title="Shared buffers" heading={<Term term="shared buffers">Shared buffers</Term>} testId="viz-buffers">
       <p className="font-mono">
@@ -277,7 +280,7 @@ function BuffersZone({ state, relations }: { state: PlaybackState; relations: Ma
         </span>
       </p>
       <ul className="flex flex-wrap gap-1 font-mono" aria-label="Pages this query used">
-        {slots.map((slot) => {
+        {slots.map((slot, item) => {
           const kind = relations.get(slot.page.relation)?.kind ?? 'table'
           const isCurrent = accessed !== null && samePage(slot.page, accessed.page)
           // A table's visibility map is part of the table: amber, dashed. A page read ahead and never used: dotted.
@@ -294,10 +297,7 @@ function BuffersZone({ state, relations }: { state: PlaybackState; relations: Ma
               data-testid="viz-slot"
               data-current={isCurrent ? accessed.type : undefined}
               data-ahead={slot.ahead ? '' : undefined}
-              title={
-                (slot.wasCached ? 'Was already in shared buffers' : 'Read from disk by this query') +
-                (slot.ahead ? '; asked for ahead of the scan, which stopped before it got there' : '')
-              }
+              {...itemProps(item)}
             >
               {shortPageName(slot.page, relations)}
             </li>
@@ -309,6 +309,7 @@ function BuffersZone({ state, relations }: { state: PlaybackState; relations: Ma
         {cached > 0 && `, ${integer.format(cached)} already cached`}
         {hidden > 0 && ` (the latest ${SHOWN_SLOTS} shown)`}
       </p>
+      {tip}
     </Zone>
   )
 }
@@ -528,9 +529,10 @@ function MiniMap({ pages, marks, current }: { pages: number; marks: Map<number, 
     if (shown === undefined || MARK_RANK.indexOf(mark) > MARK_RANK.indexOf(shown)) cellMarks[cell] = mark
   }
   const currentCell = current === null ? -1 : Math.floor(current / perCell)
+  const { itemProps, tip } = useItemTips(cells, (cell) => describeSquare(cell, perCell, pages, marks, current).detail)
   return (
     <div>
-      <div className="flex flex-wrap gap-px" role="img" aria-label="Pages of the table the query has read" data-testid="viz-minimap">
+      <div className="flex flex-wrap gap-px" role="group" aria-label="Pages of the table the query has read" data-testid="viz-minimap">
         {Array.from({ length: cells }, (_, cell) => {
           const mark = cellMarks[cell]
           const fill = mark === undefined ? 'bg-surface-2' : MARK_FILLS[mark]
@@ -538,13 +540,17 @@ function MiniMap({ pages, marks, current }: { pages: number; marks: Map<number, 
             <span
               key={cell}
               className={`size-1.5 ${fill} ${cell === currentCell ? 'outline outline-fg' : ''}`}
+              role="img"
+              aria-label={squareLabel(cell, perCell, pages)}
               data-mark={mark}
               data-current={cell === currentCell ? '' : undefined}
+              {...itemProps(cell)}
             />
           )
         })}
       </div>
       {perCell > 1 && <p className="mt-1 text-fg-muted">each square: {integer.format(perCell)} pages</p>}
+      {tip}
     </div>
   )
 }
