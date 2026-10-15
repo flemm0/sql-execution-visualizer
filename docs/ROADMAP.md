@@ -39,10 +39,37 @@ Each milestone ships as one or more PRs; merging to `main` deploys. A milestone 
 **Exit:** all 12 examples animate within budget and validate in tests.
 
 ## v2: joins and intermediate results
-- Nested Loop, Hash Join (+ Hash), Merge Join, Materialize.
-- Aggregate, HashAggregate, GroupAggregate.
-- Subqueries and CTEs (Subquery Scan, CTE Scan, InitPlan/SubPlan parameters).
-- Intermediate-result tabs in the Results pane; multi-table examples (3+ table joins).
+Joins, aggregates, subqueries and CTEs, in four milestones. Each adds its examples ([DATA.md](DATA.md#example-queries-v2), 13 to 29) to the **Examples** menu, `src/examples.ts` and the exit criteria. Milestones are ordered so that each one reuses the node types and views the earlier ones built. Until its milestone, a plan with one of these nodes says "Animation isn't available yet for …", as it does now.
+
+### M4: Nested Loop, Materialize, and more than one table on screen
+- Replay for **Nested Loop** (inner joins, with a Join Filter): the inner side runs again for each outer row, with that row's values as its parameters (`Index Cond: (customer_id = c.id)`), one loop each. Replay for **Materialize**: it stores its child's rows on the first loop and reads them back from memory after that, without asking for any pages.
+- The visualization shows several tables ([ADR 0045](decisions/0045-several-tables-on-screen.md)). One card per scan node, always on screen, gives the table, a small mini-map and the loop count. The index, buffers and heap zones show the scan working at the current step, and a visitor can pin one. Buffer slots carry the query's alias for the table (`o·h212`). A join zone shows the outer row driving the inner scan. Issue #28's ctid thread is built here, inside the detail zones.
+- Intermediate-result tabs in the Results pane ([ADR 0046](decisions/0046-intermediate-result-tabs.md)), first for **Sort** (v1's example 10 gets one) and **Materialize**.
+- The validator checks across loops: rows × loops, Index Searches and buffers summed over every loop.
+- Condensing handles repeated loops: a loop of the inner scan is a unit, and the first loops play event by event.
+
+**Exit:** examples 13, 14 and 15 animate within budget and validate in tests. Example 10's Sort and example 15's Materialize show their rows in tabs.
+
+### M5: Hash Join and aggregates
+- Replay for **Hash** and **Hash Join**: the Hash reads its whole input into a hash table, then each outer row probes it. In-memory only (`Batches: 1`); a join that splits into batches says "not available yet".
+- Replay for **Aggregate** (no GROUP BY) and **HashAggregate**: rows go into groups by key, and each group's values come from Postgres. In-memory only; an aggregate that spills to disk (`Disk Usage`) says "not available yet".
+- A hash-table view in the node zone and in the Hash's and HashAggregate's tabs. How rows are drawn into buckets gets its own ADR. Postgres's own hash functions may give each row's bucket, asked of Postgres the way B-tree key comparisons are.
+
+**Exit:** examples 16 to 20 animate within budget and validate in tests.
+
+### M6: Merge Join and GroupAggregate
+- Replay for **Merge Join**: both inputs arrive sorted by the join key, and the join walks them side by side. Duplicate inner keys make it mark its place and go back (mark and restore).
+- Replay for **GroupAggregate**: groups arrive in key order, and each one is passed on as soon as the next key starts, so a Limit above it can stop the scan early.
+
+**Exit:** examples 21 and 22 animate within budget and validate in tests.
+
+### M7: subqueries, CTEs and bigger joins
+- **InitPlan** (a subquery that runs once, its value used as a parameter) and **SubPlan** (a correlated subquery that runs once per outer row).
+- **Nested Loop Semi Join** (`EXISTS`): the inner scan stops at the first match. Anti and outer joins come here too, if they need anything beyond the semi join.
+- **Subquery Scan**, **CTE** and **CTE Scan**: a materialized CTE fills a store once, and the CTE Scan reads it, with its own tab. Postgres counts the CTE's buffer accesses in the CTE Scan's.
+- Joins of three and four tables, each with a tab for every intermediate result it holds.
+
+**Exit:** examples 23 to 29 animate within budget and validate in tests. All 29 examples are in the **Examples** menu, and the exit criteria pass on the live site.
 
 ## v3: writes and beyond
 - Animated INSERT / UPDATE / DELETE: new row versions (MVCC), HOT updates, index inserts, page splits.
