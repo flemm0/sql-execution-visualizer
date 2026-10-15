@@ -52,6 +52,9 @@ test('a visitor opens the menu with the mouse, picks an example, runs it and wat
   await expectAnimating(page)
 })
 
+/** The last example in the menu. */
+const LAST = EXAMPLES[EXAMPLES.length - 1].title
+
 test('a visitor uses the menu with the keyboard alone', async ({ page }) => {
   await openApp(page)
   await examplesButton(page).focus()
@@ -63,11 +66,11 @@ test('a visitor uses the menu with the keyboard alone', async ({ page }) => {
   await page.keyboard.press('ArrowDown')
   await expect(item(page, 'No usable index')).toBeFocused()
   await page.keyboard.press('End')
-  await expect(item(page, 'Clustering factor')).toBeFocused()
+  await expect(item(page, LAST)).toBeFocused()
   await page.keyboard.press('ArrowDown')
   await expect(item(page, 'Primary-key lookup')).toBeFocused()
   await page.keyboard.press('ArrowUp')
-  await expect(item(page, 'Clustering factor')).toBeFocused()
+  await expect(item(page, LAST)).toBeFocused()
   await page.keyboard.press('Home')
   await expect(item(page, 'Primary-key lookup')).toBeFocused()
 
@@ -79,9 +82,10 @@ test('a visitor uses the menu with the keyboard alone', async ({ page }) => {
 
   // ↑ opens it on the last example; Enter picks one and moves to the editor.
   await page.keyboard.press('ArrowUp')
-  await expect(item(page, 'Clustering factor')).toBeFocused()
-  await page.keyboard.press('ArrowUp')
-  await page.keyboard.press('ArrowUp')
+  await expect(item(page, LAST)).toBeFocused()
+  // Up from the last example to example 10, the item before it each time.
+  const topN = EXAMPLES.findIndex((example) => example.title === 'Top-N')
+  for (let i = EXAMPLES.length - 1; i > topN; i--) await page.keyboard.press('ArrowUp')
   await expect(item(page, 'Top-N')).toBeFocused()
   await page.keyboard.press('Enter')
   await expect(menu(page)).toHaveCount(0)

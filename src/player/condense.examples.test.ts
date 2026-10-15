@@ -66,6 +66,10 @@ const EXAMPLES: Example[] = [
   { name: 'example 5: pending, an Index Scan of 1,498 rows', setup: 'CREATE INDEX ON orders (status)', sql: `SELECT * FROM orders WHERE status = 'pending'` },
   { name: 'example 5: delivered, a Seq Scan returning 45,000 rows', sql: `SELECT * FROM orders WHERE status = 'delivered'` },
   { name: 'example 3: an index on product_id, a bitmap scan', setup: 'CREATE INDEX ON order_items (product_id)', sql: 'SELECT * FROM order_items WHERE product_id = 42' },
+  {
+    name: 'example 13: a Nested Loop, 38 loops of an Index Scan',
+    sql: `SELECT c.first_name, c.last_name, o.id, o.order_date FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.last_name = 'Hawkins'`,
+  },
 ]
 
 /** Bigger plans than the examples', of other shapes. */
@@ -73,6 +77,11 @@ const OTHER_SHAPES: Example[] = [
   { name: 'a Sort of 944 rows from a bitmap scan', sql: 'SELECT * FROM orders WHERE customer_id BETWEEN 100 AND 300 ORDER BY total' },
   { name: 'a top-N heapsort over all 50,000 orders', sql: 'SELECT * FROM orders ORDER BY total DESC LIMIT 10' },
   { name: 'all 200,582 rows of order_items', sql: 'SELECT * FROM order_items' },
+  {
+    name: 'a Nested Loop over 60 customers, an Index Scan of orders for each',
+    sql: 'SELECT c.id, o.id FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.id BETWEEN 1 AND 60',
+    off: ['enable_hashjoin', 'enable_mergejoin', 'enable_bitmapscan'],
+  },
 ]
 
 /** Runs a case as the app does and returns its trace, failing if it doesn't replay and validate. */
@@ -135,4 +144,23 @@ describe('bigger plans of other shapes fit the budget too', () => {
       expectCondensed(await traceOf(shape))
     }, 60_000)
   }
+})
+
+describe('a Nested Loop', () => {
+  /** Checks each loop of the inner side starts with a step of its own, never inside a stretch; returns how many loops. */
+  function expectLoopsOnTheirOwn(trace: Trace): number {
+    const steps = expectCondensed(trace)
+    const loops = trace.events.flatMap((event, i) => (event.type === 'join.loop' ? [i] : []))
+    for (const at of loops) expect(steps).toContainEqual({ start: at, end: at + 1 })
+    return loops.length
+  }
+
+  it('example 13: each of its 38 loops starts with a step of its own', async () => {
+    expect(expectLoopsOnTheirOwn(await traceOf(EXAMPLES.find((example) => example.name.startsWith('example 13')) as Example))).toBe(38)
+  })
+
+  it('a longer one, with stretches inside its loops: each loop still starts with a step of its own', async () => {
+    const join = OTHER_SHAPES.find((shape) => shape.name.startsWith('a Nested Loop')) as Example
+    expect(expectLoopsOnTheirOwn(await traceOf(join))).toBe(60)
+  }, 60_000)
 })

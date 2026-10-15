@@ -11,6 +11,12 @@ import type { PageRef } from './trace'
 export class SharedBuffers {
   /** Pages in buffers now, as "relation/fork/block". */
   private cached = new Set<string>()
+  /**
+   * The visibility map page each index-only scan keeps pinned, by plan node.
+   * It keeps it from one loop of a Nested Loop to the next, and pays no
+   * buffer access for it again (see indexScanEvents).
+   */
+  pinnedMapPages = new Map<number, number>()
 
   constructor(snapshot: CacheSnapshot, relations: Relation[]) {
     const oids = new Set(relations.map((relation) => relation.oid))

@@ -46,15 +46,18 @@ export function ReplayStatus({ replay }: { replay: Replay }) {
           </tr>
         </thead>
         <tbody>
-          {checks.map((check) => (
+          {checks.map((check, i) => (
             <tr
-              key={check.label}
+              // Two joins in one plan can share a heading, and so their checks' labels.
+              key={i}
               className={check.ok ? 'text-fg' : 'text-rejected'}
               data-testid="replay-check"
               data-check={check.label}
             >
               <td className="pr-3">
                 {check.ok ? '✓' : '✗'} <CheckLabel label={check.label} />
+                {/* Postgres reports this count as an average per loop: both numbers are. */}
+                {check.loops !== undefined && <span className="text-fg-muted"> per loop, of {integer.format(check.loops)}</span>}
               </td>
               <td className="pr-3 text-right">{integer.format(check.postgres)}</td>
               <td className="pr-3 text-right">{integer.format(check.replay)}</td>
@@ -74,6 +77,7 @@ export function ReplayStatus({ replay }: { replay: Replay }) {
 /** What a check compares, after its plan node's heading (validate.ts), and the term for it. */
 const CHECK_TERMS: Record<string, GlossaryTerm> = {
   'rows removed by filter': 'Rows Removed by Filter',
+  'rows removed by join filter': 'Rows Removed by Join Filter',
   'index searches': 'Index Searches',
   'heap fetches': 'Heap Fetches',
   'exact heap blocks': 'Exact Heap Blocks',

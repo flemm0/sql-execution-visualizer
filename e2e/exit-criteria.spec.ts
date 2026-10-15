@@ -27,6 +27,12 @@ async function expectWithinBudget(page: Page) {
 /** M2's exit criteria: these examples were the first to animate end to end. */
 const M2_EXAMPLES = new Set([1, 2, 4, 11])
 
+/** The milestone whose exit criteria an example is part of (docs/ROADMAP.md). */
+function milestoneOf(id: number) {
+  if (M2_EXAMPLES.has(id)) return 'M2'
+  return id <= 12 ? 'M3' : 'M4'
+}
+
 /** The editor line holding a step's statement; `nth` counts earlier steps with the same SQL. */
 function statementLine(page: Page, sql: string, nth: number) {
   const exact = new RegExp(`^${escapeRegExp(sql + ';')}$`)
@@ -54,7 +60,7 @@ function escapeRegExp(text: string) {
 }
 
 for (const example of EXAMPLES) {
-  const milestone = M2_EXAMPLES.has(example.id) ? 'M2' : 'M3'
+  const milestone = milestoneOf(example.id)
   test(`${milestone}: example ${example.id}, ${example.title}, from the Examples menu, animates end to end and validates`, async ({
     page,
   }) => {

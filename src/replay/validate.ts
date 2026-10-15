@@ -3,12 +3,19 @@ import { passesRowOn, type PageRef, type Trace } from './trace'
 
 /*
  * The validator checks a replay against what Postgres reported: each node's
- * row count, rows removed by its filter, searches down an index (Postgres
- * 18's "Index Searches"), rows an index-only scan fetched from the heap
- * ("Heap Fetches"), heap pages a bitmap heap scan read ("Exact Heap
- * Blocks"), and buffer hits and reads from EXPLAIN ANALYZE, and the rows
- * sent to the result against the real result. The animation plays either
- * way; a failed check is shown as a warning.
+ * row count, rows removed by its filter or its Join Filter, searches down an
+ * index (Postgres 18's "Index Searches"), rows an index-only scan fetched
+ * from the heap ("Heap Fetches"), heap pages a bitmap heap scan read ("Exact
+ * Heap Blocks"), and buffer hits and reads from EXPLAIN ANALYZE, and the
+ * rows sent to the result against the real result. The animation plays
+ * either way; a failed check is shown as a warning.
+ *
+ * A node that ran more than once (a Nested Loop's inner side, once per outer
+ * row) is checked over all its loops. Postgres reports its rows, and rows
+ * removed by a filter, as an average per loop, rounded (rows to 2 decimals,
+ * rows removed to whole rows): those are checked per loop, the replay's
+ * total divided by the loops and rounded the same way. Its index searches,
+ * heap fetches, heap blocks and buffers are totals over every loop.
  */
 
 /** One comparison between Postgres's number and the replay's. */
@@ -18,6 +25,12 @@ export interface Check {
   postgres: number
   replay: number
   ok: boolean
+  /**
+   * For a node that ran more than once, when Postgres reports this count as
+   * an average per loop: how many loops. Both numbers are then per loop.
+   * Absent for a count over every loop.
+   */
+  loops?: number
 }
 
 export interface Validation {
@@ -59,7 +72,7 @@ export function validate(input: ValidationInput): Validation {
     const buffers = trace.events.filter((event) => subtree.has(event.node))
 
     // A bitmap index scan's rows are the rows it marks in its bitmap.
-    checks.push(check(`${node.title}: rows`, Math.round(node.actualRows * node.loops), own.filter(passesRowOn).length))
+    checks.push(perLoop(`${node.title}: rows`, node.actualRows, own.filter(passesRowOn).length, node.loops, 2))
     if (node.rowsRemovedByFilter !== null) {
       let removed = 0
       for (const event of own) {
@@ -69,7 +82,11 @@ export function validate(input: ValidationInput): Validation {
         // An index-only scan checks the filter on an all-visible page's entries without fetching their rows.
         if (event.type === 'visibility.check' && event.matched === false) removed++
       }
-      checks.push(check(`${node.title}: rows removed by filter`, Math.round(node.rowsRemovedByFilter * node.loops), removed))
+      checks.push(perLoop(`${node.title}: rows removed by filter`, node.rowsRemovedByFilter, removed, node.loops, 0))
+    }
+    if (node.rowsRemovedByJoinFilter !== null) {
+      const removed = own.filter((event) => event.type === 'join.filter' && !event.matched).length
+      checks.push(perLoop(`${node.title}: rows removed by join filter`, node.rowsRemovedByJoinFilter, removed, node.loops, 0))
     }
     if (node.indexSearches !== null) {
       const searches = own.filter((event) => event.type === 'index.search').length
@@ -77,16 +94,21 @@ export function validate(input: ValidationInput): Validation {
     }
     if (node.heapFetches !== null) {
       const fetches = own.filter((event) => event.type === 'heap.tuple').length
-      checks.push(check(`${node.title}: heap fetches`, Math.round(node.heapFetches * node.loops), fetches))
+      checks.push(check(`${node.title}: heap fetches`, node.heapFetches, fetches))
     }
     if (node.exactHeapBlocks !== null) {
-      // A bitmap heap scan's own page accesses are the heap pages its bitmap marks, each once,
-      // besides pages it read ahead and never got to, when a Limit stopped it.
-      const pages = new Set<string>()
+      // A bitmap heap scan's own page accesses are the heap pages its bitmap marks, each once per
+      // loop, besides pages it read ahead and never got to, when a Limit stopped it.
+      let pages = 0
+      let pagesThisLoop = new Set<string>()
       for (const event of own) {
-        if ((event.type === 'buffer.hit' || event.type === 'buffer.read') && event.ahead !== true) pages.add(pageKey(event.page))
+        if (event.type === 'node.start') pagesThisLoop = new Set()
+        if ((event.type === 'buffer.hit' || event.type === 'buffer.read') && event.ahead !== true && !pagesThisLoop.has(pageKey(event.page))) {
+          pagesThisLoop.add(pageKey(event.page))
+          pages++
+        }
       }
-      checks.push(check(`${node.title}: exact heap blocks`, Math.round(node.exactHeapBlocks * node.loops), pages.size))
+      checks.push(check(`${node.title}: exact heap blocks`, node.exactHeapBlocks, pages))
     }
     checks.push(check(`${node.title}: buffer hits`, node.sharedHit, buffers.filter((e) => e.type === 'buffer.hit').length))
     checks.push(check(`${node.title}: buffer reads`, node.sharedRead, buffers.filter((e) => e.type === 'buffer.read').length))
@@ -113,6 +135,20 @@ function pageKey(page: PageRef) {
 
 function check(label: string, postgres: number, replay: number): Check {
   return { label, postgres, replay, ok: postgres === replay }
+}
+
+/**
+ * A check of a count Postgres reports per loop, rounded to `decimals`
+ * (`reported`), against the replay's total over `loops` loops. With one
+ * loop, it's the total, a whole number. With more, the replay's total is
+ * divided by the loops; it matches if it rounds to Postgres's number.
+ */
+function perLoop(label: string, reported: number, total: number, loops: number, decimals: number): Check {
+  if (loops <= 1) return check(label, reported, total)
+  const average = total / loops
+  // Half of the last decimal place either way, and a little for floating point.
+  const ok = Math.abs(average - reported) <= 0.5 * 10 ** -decimals + 1e-9
+  return { label, postgres: reported, replay: Number(average.toFixed(decimals)), ok, loops }
 }
 
 function sameRow(a: (string | null)[], b: (string | null)[] | undefined) {
