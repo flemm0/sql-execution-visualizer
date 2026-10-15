@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { readSetting, saveSetting } from '../storage'
 import { collapseStretch, eventsDone, expandStretch, isStretch, type Step } from './condense'
+import { landOnEvent } from './jump'
 import { startOfTrace, type Speed } from './playback'
 
 export type { Speed }
@@ -49,6 +50,8 @@ export interface Player {
   expand: () => void
   /** Collapses the expanded stretch the current step is in back into one step, and pauses on it. */
   collapse: () => void
+  /** Pauses on the step showing trace event `index` alone, expanding the stretch it's in, and collapsing an expanded one it leaves (see jump). */
+  jumpToEvent: (index: number) => void
 }
 
 /**
@@ -142,6 +145,12 @@ export function usePlayer(): Player {
       setWantsToPlay(false)
       setList(collapsed.steps)
       setPosition(collapsed.index + 1)
+    },
+    jumpToEvent(index) {
+      const landing = landOnEvent(list, position, index)
+      setWantsToPlay(false)
+      setList(landing.steps)
+      setPosition(landing.position)
     },
   }
 }

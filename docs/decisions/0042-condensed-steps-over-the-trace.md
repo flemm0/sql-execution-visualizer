@@ -47,7 +47,7 @@ Condensing takes under 30 ms for every example, and about 0.2 s for the 203,140-
 - **Expanding is lazy.** A stretch on screen has an **Expand** button; it replaces the stretch's one step with one step per event, each remembering the stretch, and pauses on the first. Inside, the bar says which event of how many this is, with **Collapse**, which puts the one step back and pauses on it. Only the expanded stretch's steps are made; the events were in the trace all along.
 - **Speed is steps per second over the steps being played**: the condensed steps, plus one per event of any expanded stretch. Instant still jumps to the last step.
 - **What the page exposes:** the player's `data-steps` (steps to play), `data-events` (events in the trace) and `data-events-done`, and the step counter adds the event count when they differ ("step 120 / 884 (2,747 events)"). The exit criteria read `data-steps`.
-- **Jump-to-next controls (next):** they'll search the trace forward from the events done, then land on the step holding that event, expanding its stretch when the event is inside one, as `e2e/player.ts`'s `seekToEvent` does.
+- **Jump-to-next controls** ([ADR 0043](0043-jump-to-next.md)): they search the trace forward from the events done, then land on the step holding that event, expanding its stretch when the event is inside one, as `e2e/player.ts`'s `seekToEvent` does.
 
 ## Consequences
 - Every example plays in at most 30 seconds at the default speed; so do a Sort of 944 rows, a top-N heapsort over 50,000 rows and a Seq Scan returning all 200,582 rows of `order_items`.
