@@ -39,6 +39,10 @@ export interface BufferSlot {
   wasCached: boolean
   /** Whether a scan asked for it ahead of time and never got to it (a Limit stopped the scan). */
   ahead: boolean
+  /** How many times the query has asked for it so far and found it in shared buffers. */
+  hits: number
+  /** How many times the query has asked for it so far and read it from disk. */
+  reads: number
 }
 
 /** An index page the current search went through. */
@@ -344,7 +348,7 @@ export function stateAt(trace: Trace, nodes: Map<number, NodeInfo>, position: nu
   const context: Context = {
     relations,
     nodes,
-    slots: new Set(),
+    slots: new Map(),
     working: [],
     sortRows: new Map(trace.sorts.map((sort) => [sort.node, new Map(sort.rows.map((row) => [rowKey(row.row), row]))])),
     sortKeys: new Map(trace.sorts.map((sort) => [sort.node, sort.keys])),
@@ -364,8 +368,8 @@ export function stateAt(trace: Trace, nodes: Map<number, NodeInfo>, position: nu
 interface Context {
   relations: Map<number, TraceRelation>
   nodes: Map<number, NodeInfo>
-  /** The pages in the buffers zone, as "relation/fork/block". */
-  slots: Set<string>
+  /** The pages in the buffers zone, by "relation/fork/block". */
+  slots: Map<string, BufferSlot>
   /** The nodes started and not finished, the latest last. */
   working: number[]
   /** Each Sort's rows, by node, then by rowKey. */
@@ -432,9 +436,15 @@ function apply(state: PlaybackState, event: TraceEvent, context: Context) {
       if (hit) state.hits++
       else state.reads++
       const key = `${event.page.relation}/${event.page.fork ?? 'main'}/${event.page.block}`
-      if (!slots.has(key)) {
-        slots.add(key)
-        state.buffers.push({ page: event.page, wasCached: hit, ahead: event.ahead === true })
+      const slot = slots.get(key)
+      if (slot === undefined) {
+        const added = { page: event.page, wasCached: hit, ahead: event.ahead === true, hits: hit ? 1 : 0, reads: hit ? 0 : 1 }
+        slots.set(key, added)
+        state.buffers.push(added)
+      } else if (hit) {
+        slot.hits++
+      } else {
+        slot.reads++
       }
       // A page read ahead that the scan never got to: it isn't the page being read now.
       if (event.ahead === true) {
