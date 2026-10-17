@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 import { commandName, splitStatements } from '../src/db/statements'
 import { EXAMPLES, count, type ExampleStep } from '../src/examples'
 import { editorContent, openApp, waitForRunToFinish } from './editor'
+import { toTheEnd } from './player'
 
 /** The ~30 s budget at the default 30 steps a second (ADR 0005): the most steps an animation may have. */
 const STEP_BUDGET = 900
@@ -84,7 +85,7 @@ for (const example of EXAMPLES) {
       await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres')
       await expect(page.getByTestId('viz-mismatch')).toHaveCount(0)
       await expectWithinBudget(page)
-      await page.getByTestId('player').getByRole('button', { name: 'To the end', exact: true }).click()
+      await toTheEnd(page)
       const rows = count(step.expect.rows, 'row')
       await expect(page.getByTestId('viz-caption')).toHaveText(`${step.expect.plan[0]} has no more rows: it sent ${rows} to the result.`)
       // At the last step the whole result shows.

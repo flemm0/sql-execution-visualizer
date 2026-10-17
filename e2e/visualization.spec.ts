@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { openApp, runSql } from './editor'
-import { seekToEvent } from './player'
+import { pauseAtStart, seekToEvent } from './player'
 
 function viz(page: Page) {
   return page.getByTestId('visualization')
@@ -56,8 +56,7 @@ test('example 2 runs through every page of order_items, step by step or straight
   await openApp(page)
   await runSql(page, 'SELECT * FROM order_items WHERE product_id = 42;')
   await expect(viz(page)).toBeVisible()
-  await control(page, 'Pause').click()
-  await control(page, 'To the start').click()
+  await pauseAtStart(page)
   await expect(step(page)).toHaveText(/^step 0 \/ /)
   await expect(caption(page)).toContainText('Ready to replay')
   // The plan tree follows the player: the Seq Scan waits, then works, counting its rows as it goes.
@@ -126,8 +125,7 @@ test('the result fills in as the animation emits rows, and Skip to end shows it 
   await runSql(page, 'SELECT * FROM order_items WHERE product_id = 42;')
   const filling = page.getByTestId('rows-filling')
   const tableRows = page.getByTestId('result-table').locator('tbody tr')
-  await control(page, 'Pause').click()
-  await control(page, 'To the start').click()
+  await pauseAtStart(page)
   await expect(filling).toHaveText('Rows appear as the animation sends them to the result: 0 of 189 so far.Skip to end')
   await expect(tableRows).toHaveCount(0)
 

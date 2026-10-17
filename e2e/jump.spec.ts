@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { openApp, runSql } from './editor'
+import { pauseAtStart } from './player'
 
 /*
  * Jump-to-next controls (docs/UX.md#playback, ADR 0043): Next row, page and
@@ -22,8 +23,7 @@ async function stepCounter(page: Page): Promise<[number, number]> {
 test('example 2: Next row pauses on each row sent to the result, and Next node on the scan starting and finishing', async ({ page }) => {
   await openApp(page)
   await runSql(page, 'SELECT * FROM order_items WHERE product_id = 42;')
-  await control(page, 'Pause').click()
-  await control(page, 'To the start').click()
+  await pauseAtStart(page)
   const caption = page.getByTestId('viz-caption')
 
   await control(page, 'Next result row').click()
@@ -46,8 +46,7 @@ test('example 2: Next row pauses on each row sent to the result, and Next node o
 test('example 2: Next page goes into stretches page by page, collapsing each one it leaves', async ({ page }) => {
   await openApp(page)
   await runSql(page, 'SELECT * FROM order_items WHERE product_id = 42;')
-  await control(page, 'Pause').click()
-  await control(page, 'To the start').click()
+  await pauseAtStart(page)
   const [, steps] = await stepCounter(page)
   const caption = page.getByTestId('viz-caption')
   const stretch = page.getByTestId('viz-stretch')
@@ -68,8 +67,7 @@ test('example 4: Next row reaches rows inside stretches, one expanded at a time'
   await openApp(page)
   // 1,001 rows: each stretch carries its rows, so a jump has to expand one.
   await runSql(page, 'SELECT * FROM orders WHERE id BETWEEN 1000 AND 2000;')
-  await control(page, 'Pause').click()
-  await control(page, 'To the start').click()
+  await pauseAtStart(page)
   const [, steps] = await stepCounter(page)
   const caption = page.getByTestId('viz-caption')
   const stretch = page.getByTestId('viz-stretch')

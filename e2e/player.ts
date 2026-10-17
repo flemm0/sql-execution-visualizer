@@ -43,3 +43,41 @@ export async function seekToEvent(page: Page, events: number) {
   await timeline.fill(String(low + events - first))
   expect(await eventsDone(page)).toBe(events)
 }
+
+function playerButton(page: Page, name: string) {
+  return page.getByTestId('player').getByRole('button', { name, exact: true })
+}
+
+/** The step counter's numbers: [position, steps]. */
+async function stepCounter(page: Page): Promise<[number, number]> {
+  const text = (await page.getByTestId('viz-step').textContent()) ?? ''
+  const match = text.replace(/,/g, '').match(/step (\d+) \/ (\d+)/)
+  return [Number(match?.[1]), Number(match?.[2])]
+}
+
+/**
+ * Pauses the player and moves it to its first step. Paused before its first
+ * step played, it's there already, and To the start is disabled, so it's
+ * clicked only when it isn't.
+ */
+export async function pauseAtStart(page: Page) {
+  await playerButton(page, 'Pause').click()
+  const toStart = playerButton(page, 'To the start')
+  if (await toStart.isEnabled()) await toStart.click()
+  await expect(page.getByTestId('viz-step')).toHaveText(/^step 0 \//)
+}
+
+/**
+ * Moves the player to its last step. A short trace can get there by itself
+ * while playing, which disables To the end, so it's clicked only while it
+ * isn't, until the player is at its last step.
+ */
+export async function toTheEnd(page: Page) {
+  const toEnd = playerButton(page, 'To the end')
+  await expect(async () => {
+    if (await toEnd.isEnabled()) await toEnd.click({ timeout: 1_000 })
+    const [position, steps] = await stepCounter(page)
+    expect(steps).toBeGreaterThan(0)
+    expect(position).toBe(steps)
+  }).toPass({ timeout: 10_000 })
+}
