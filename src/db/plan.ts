@@ -63,6 +63,12 @@ export interface PlanNode {
   filter: string | null
   /** Rows the Filter rejected, per loop like actualRows; null if the node has no Filter. */
   rowsRemovedByFilter: number | null
+  /** A join's Join Filter as Postgres deparses it, e.g. "(a.id < b.id)": checked on each pair of rows; null if it has none. */
+  joinFilter: string | null
+  /** Pairs the Join Filter rejected, per loop like actualRows; null if the node has no Join Filter. */
+  rowsRemovedByJoinFilter: number | null
+  /** Whether a join knows each outer row matches at most one inner row, so it stops looking after the first ("Inner Unique"). */
+  innerUnique: boolean
   /** The index an index scan reads, e.g. "orders_pkey"; null for other nodes. It lives in the table's schema. */
   indexName: string | null
   /** An index scan's Index Cond as Postgres deparses it, e.g. "(orders.id = 4242)"; null if it has none. */
@@ -199,6 +205,8 @@ function parseNode(node: JsonPlanNode, newId: () => number): PlanNode {
   const alias = node['Alias']
   const filter = node['Filter']
   const removed = node['Rows Removed by Filter']
+  const joinFilter = node['Join Filter']
+  const removedByJoinFilter = node['Rows Removed by Join Filter']
   const indexName = node['Index Name']
   const indexCond = node['Index Cond']
   const indexSearches = node['Index Searches']
@@ -224,6 +232,10 @@ function parseNode(node: JsonPlanNode, newId: () => number): PlanNode {
         : null,
     filter: typeof filter === 'string' ? filter : null,
     rowsRemovedByFilter: typeof filter === 'string' && typeof removed === 'number' ? removed : null,
+    joinFilter: typeof joinFilter === 'string' ? joinFilter : null,
+    rowsRemovedByJoinFilter:
+      typeof joinFilter === 'string' && typeof removedByJoinFilter === 'number' ? removedByJoinFilter : null,
+    innerUnique: node['Inner Unique'] === true,
     indexName: typeof indexName === 'string' ? indexName : null,
     indexCond: typeof indexCond === 'string' ? indexCond : null,
     backward: node['Scan Direction'] === 'Backward',

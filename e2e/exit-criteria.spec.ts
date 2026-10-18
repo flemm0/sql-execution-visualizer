@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 import { commandName, splitStatements } from '../src/db/statements'
 import { EXAMPLES, count, type ExampleStep } from '../src/examples'
 import { editorContent, openApp, waitForRunToFinish } from './editor'
+import { toTheEnd } from './player'
 
 /** The ~30 s budget at the default 30 steps a second (ADR 0005): the most steps an animation may have. */
 const STEP_BUDGET = 900
@@ -26,6 +27,12 @@ async function expectWithinBudget(page: Page) {
 
 /** M2's exit criteria: these examples were the first to animate end to end. */
 const M2_EXAMPLES = new Set([1, 2, 4, 11])
+
+/** The milestone whose exit criteria an example is part of (docs/ROADMAP.md). */
+function milestoneOf(id: number) {
+  if (M2_EXAMPLES.has(id)) return 'M2'
+  return id <= 12 ? 'M3' : 'M4'
+}
 
 /** The editor line holding a step's statement; `nth` counts earlier steps with the same SQL. */
 function statementLine(page: Page, sql: string, nth: number) {
@@ -54,7 +61,7 @@ function escapeRegExp(text: string) {
 }
 
 for (const example of EXAMPLES) {
-  const milestone = M2_EXAMPLES.has(example.id) ? 'M2' : 'M3'
+  const milestone = milestoneOf(example.id)
   test(`${milestone}: example ${example.id}, ${example.title}, from the Examples menu, animates end to end and validates`, async ({
     page,
   }) => {
@@ -78,7 +85,7 @@ for (const example of EXAMPLES) {
       await expect(page.getByTestId('replay-status')).toContainText('✓ Replay matches Postgres')
       await expect(page.getByTestId('viz-mismatch')).toHaveCount(0)
       await expectWithinBudget(page)
-      await page.getByTestId('player').getByRole('button', { name: 'To the end', exact: true }).click()
+      await toTheEnd(page)
       const rows = count(step.expect.rows, 'row')
       await expect(page.getByTestId('viz-caption')).toHaveText(`${step.expect.plan[0]} has no more rows: it sent ${rows} to the result.`)
       // At the last step the whole result shows.

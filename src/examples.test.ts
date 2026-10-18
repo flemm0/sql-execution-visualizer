@@ -27,6 +27,11 @@ function titles(node: PlanNode): string[] {
   return [node.title, ...node.children.flatMap(titles)]
 }
 
+/** The depth of each of a plan's nodes, depth first, 0 for the top. */
+function depths(node: PlanNode, depth = 0): number[] {
+  return [depth, ...node.children.flatMap((child) => depths(child, depth + 1))]
+}
+
 /** The heap pages a query went through (read or found in shared buffers), not counting visibility map pages. */
 function heapPages(trace: Trace): number {
   const tables = new Set(trace.relations.filter((relation) => relation.kind === 'table').map((relation) => relation.id))
@@ -79,6 +84,7 @@ function expectNoError(result: StatementResult, sql: string) {
 function checkQuery(result: StatementResult, sql: string, expected: ExpectedPlan, again: boolean) {
   if (result.status !== 'rows' || result.plan === null) throw new Error(`${sql}: no plan`)
   expect(titles(result.plan.root), sql).toEqual(expected.plan)
+  expect(depths(result.plan.root), sql).toEqual(expected.depths ?? expected.plan.map((_, i) => i))
   expect(result.totalRows, sql).toBe(expected.rows)
 
   const replay = result.replay
@@ -109,7 +115,7 @@ describe('each example on a fresh database', () => {
 })
 
 describe('the examples in any order, and again', () => {
-  it('runs all 12 in order, then in reverse, then in order again, with the same plans', async () => {
+  it('runs them all in order, then in reverse, then in order again, with the same plans', async () => {
     const db = await freshDatabase()
     try {
       for (const example of EXAMPLES) await runExample(db, example, false)
@@ -123,6 +129,7 @@ describe('the examples in any order, and again', () => {
 
 /** Plan node types the descriptions talk about, longest first so "Index Scan" doesn't match inside "Bitmap Index Scan". */
 const NODE_TYPES = [
+  'Nested Loop',
   'Index Scan Backward',
   'Bitmap Index Scan',
   'Bitmap Heap Scan',
@@ -145,8 +152,8 @@ function nodeTypesNamed(text: string): Set<string> {
 }
 
 describe('what the examples say', () => {
-  it('numbers them 1 to 12, as docs/DATA.md does', () => {
-    expect(EXAMPLES.map((example) => example.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+  it('numbers them 1 to 13, as docs/DATA.md does', () => {
+    expect(EXAMPLES.map((example) => example.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
   })
 
   it('names only plan nodes Postgres actually uses for them', () => {
@@ -169,5 +176,17 @@ describe('what the examples say', () => {
     )
     // The cursor starts on the first statement, so Run runs it.
     expect(text.slice(cursor)).toMatch(/^DROP INDEX IF EXISTS order_items_product_id_idx;/)
+  })
+
+  it('indents a join’s inner side under the join, as EXPLAIN does', () => {
+    const { text } = exampleEditorText(EXAMPLES.find((example) => example.id === 13) as Example)
+    expect(text).toContain(
+      [
+        '--   Nested Loop',
+        '--   ->  Bitmap Heap Scan on customers c',
+        '--         ->  Bitmap Index Scan on customers_last_name_first_name_idx',
+        '--   ->  Index Scan using orders_customer_id_order_date_idx on orders o',
+      ].join('\n'),
+    )
   })
 })

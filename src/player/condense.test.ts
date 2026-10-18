@@ -198,3 +198,38 @@ describe('expanding and collapsing a stretch', () => {
     expect([0, 1, 2, 3, 4, 5, 6].map((position) => eventsDone(expanded, position))).toEqual([0, 1, 2, 3, 4, 5, 6])
   })
 })
+
+describe('condensing a Nested Loop with a Join Filter', () => {
+  /** 60 loops of an inner Seq Scan of one page with 20 rows; the Join Filter passes one pair in each loop. */
+  function joinFilterTrace(): Trace {
+    const events: TraceEvent[] = [{ type: 'node.start', node: 0 }, { type: 'node.start', node: 1 }]
+    const page = { relation: TABLE, block: 0 }
+    let resultIndex = 0
+    for (let loop = 1; loop <= 60; loop++) {
+      const outer = [{ relation: TABLE, block: 1, offset: loop }]
+      events.push({ type: 'row.emit', node: 1, row: outer[0], resultIndex: null })
+      events.push({ type: 'join.loop', node: 0, loop, outer, params: [] })
+      events.push({ type: 'node.start', node: 2 }, { type: 'buffer.hit', node: 2, page })
+      events.push({ type: 'heap.page', node: 2, page, visibleRows: 20, matchedRows: 20 })
+      for (let offset = 1; offset <= 20; offset++) {
+        const row = { relation: TABLE, block: 0, offset }
+        const matched = offset === loop % 20
+        events.push({ type: 'row.emit', node: 2, row, resultIndex: null })
+        events.push({ type: 'join.filter', node: 0, outer, row, matched })
+        if (matched) events.push({ type: 'row.emit', node: 0, row, outer, resultIndex: resultIndex++ })
+      }
+      events.push({ type: 'node.finish', node: 2 })
+    }
+    events.push({ type: 'node.finish', node: 1 }, { type: 'node.finish', node: 0 })
+    return trace(events)
+  }
+
+  it('keeps each Join Filter check with the row it checks: no step starts with one', () => {
+    const t = joinFilterTrace()
+    expect(t.events.length).toBeGreaterThan(STEP_BUDGET)
+    const steps = condense(t)
+    expectEveryEventOnce(steps, t.events.length)
+    expect(steps.length).toBeLessThanOrEqual(STEP_BUDGET)
+    expect(steps.filter((step) => t.events[step.start].type === 'join.filter')).toEqual([])
+  })
+})

@@ -157,7 +157,9 @@ describe('replaying a Bitmap Heap Scan', () => {
     const explained = await db.query<{ 'QUERY PLAN': unknown }>(`EXPLAIN (VERBOSE, FORMAT JSON) ${example6}`)
     const json = explained.rows[0]['QUERY PLAN']
     const prepared = await prepareReplay(db, parsePlan(json), await findRelations(db, tablesInPlan(json)))
-    expect(prepared).toMatchObject({ status: 'walked', walk: { indexName: 'orders_customer_id_order_date_idx' }, visibilityMap: null })
+    expect(prepared?.status).toBe('walked')
+    if (prepared?.status !== 'walked') return
+    expect([...prepared.walks.values()]).toMatchObject([{ walk: { indexName: 'orders_customer_id_order_date_idx' }, visibilityMap: null }])
   })
 
   it('example 6 with a warm cache: every page is a hit', async () => {

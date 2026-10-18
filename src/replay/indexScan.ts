@@ -33,7 +33,7 @@ import { Unsupported } from './unsupported'
  *    Filter on the ones the query can see.
  *
  * Step 1 runs before the query does (walkIndexScan), step 2 after
- * (replayIndexScan).
+ * (fetchIndexScan, then indexScanEvents).
  *
  * An Index Only Scan walks its index the same way, but before fetching a row
  * it checks the table's visibility map: if the row's heap page is
@@ -94,31 +94,32 @@ export async function walkIndexScan(db: PGliteInterface, node: PlanNode, index: 
   }
 }
 
+/** What an index scan's rows turned out to be, after the query ran, for indexScanEvents. */
+export interface FetchedIndexScan {
+  /** Each matching entry's row: the version the query sees, and whether it passed the Filter, by tidText. */
+  rows: Map<string, FetchedRow>
+  /** The entries the query marked dead, by leaf page (see markedDead). */
+  dead: Map<number, Set<number>>
+}
+
 /**
- * The trace of an Index Scan or Index Only Scan at the top of the plan, from
- * its walk of the index, after the query has run: fetches the rows the walk
- * found entries for, and finds the entries the scan marked dead.
- * `visibilityMap` is the table's map as an Index Only Scan found it, and null
- * for an Index Scan. `rowsNeeded`: the most rows its parent will ask for
- * (a Limit's), null for all.
+ * Step 2 of an Index Scan or Index Only Scan, after the query has run: fetches
+ * the rows its walk of the index found entries for, and finds the entries
+ * the scan marked dead. indexScanEvents then makes its trace.
  */
-export async function replayIndexScan(
+export async function fetchIndexScan(
   db: PGliteInterface,
   node: PlanNode,
   table: Relation,
   index: Relation,
   walk: IndexWalk,
-  visibilityMap: VisibilityMap | null,
-  buffers: SharedBuffers,
-  rowsNeeded: number | null,
-): Promise<TraceEvent[]> {
+): Promise<FetchedIndexScan> {
   // An Index Only Scan doesn't fetch rows on all-visible pages, but their
   // values are read by ctid to check the result, and the version it can see
   // may not be the one its entry points at (a HOT update before VACUUM).
-  const tids = entryTids(walk)
-  const rows = await fetchRows(db, node, table, tids)
+  const rows = await fetchRows(db, node, table, entryTids(walk))
   const dead = await markedDead(db, index, walk.steps)
-  return [...indexScanEvents(node, table, index, walk.steps, rows, dead, visibilityMap, buffers, rowsNeeded)]
+  return { rows, dead }
 }
 
 /** The heap rows a walk's matching entries point at, in index order. */
@@ -407,8 +408,11 @@ function hotChain(page: HeapPage, offset: number): number[] {
  * for each entry's heap page first (VM_ALL_VISIBLE in nodeIndexonlyscan.c),
  * and fetches the row only when the page isn't all-visible. It keeps the map
  * page it last read pinned, so reading the map costs one buffer access for
- * the first entry (each map page covers tens of thousands of heap pages). A
- * table with no map yet costs none, and no page of it is all-visible.
+ * the first entry (each map page covers tens of thousands of heap pages).
+ * It keeps it pinned when it runs again, in the next loop of a Nested Loop
+ * (ExecReScanIndexOnlyScan doesn't let go of it), so `buffers` remembers it
+ * from one loop to the next. A table with no map yet costs none, and no page
+ * of it is all-visible.
  *
  * Under a Limit that needs only `rowsNeeded` rows, the scan stops after
  * passing up that many, wherever it is; it doesn't finish. It marks the dead
@@ -428,8 +432,6 @@ export function* indexScanEvents(
 ): Generator<TraceEvent> {
   yield { type: 'node.start', node: node.id }
   let pinned: number | null = null
-  /** The visibility map page the scan has pinned. */
-  let pinnedMapPage: number | null = null
   /** The leaf page the scan is on, and the entries it returned from it. */
   let leaf: { block: number; returned: number[] } | null = null
   let passed = 0
@@ -474,8 +476,8 @@ export function* indexScanEvents(
       if (visibilityMap !== null) {
         const heapPage = { relation: table.oid, block: step.tid.block }
         const mapPage = Math.floor(step.tid.block / visibilityMap.heapPagesPerMapPage)
-        if (mapPage < visibilityMap.pages && mapPage !== pinnedMapPage) {
-          pinnedMapPage = mapPage
+        if (mapPage < visibilityMap.pages && mapPage !== buffers.pinnedMapPages.get(node.id)) {
+          buffers.pinnedMapPages.set(node.id, mapPage)
           const page = { relation: table.oid, block: mapPage, fork: 'vm' as const }
           yield { type: buffers.access(page), node: node.id, page }
         }

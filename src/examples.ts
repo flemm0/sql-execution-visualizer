@@ -1,6 +1,7 @@
 /*
  * The Examples menu's ready-made queries: one concept from SQL Performance
- * Explained each (docs/DATA.md#example-queries-v1). The menu, the tests
+ * Explained each (docs/DATA.md#example-queries-v1, and v2's as their
+ * milestones animate them). The menu, the tests
  * (src/examples.test.ts, e2e/exit-criteria.spec.ts) and the docs all read
  * these definitions, so they agree.
  *
@@ -13,10 +14,16 @@
 export interface ExpectedPlan {
   /**
    * The plan's node headings as text EXPLAIN writes them, outermost first,
-   * e.g. ["Limit", "Index Scan Backward using orders_customer_id_order_date_idx on orders"].
-   * In v1 every plan is a chain (each node has at most one child), so the list is the whole tree.
+   * depth first (a join's outer side before its inner side), e.g.
+   * ["Limit", "Index Scan Backward using orders_customer_id_order_date_idx on orders"].
    */
   plan: string[]
+  /**
+   * Each node's depth in the plan, 0 for the top, when the plan isn't a
+   * chain (a join has two children). Absent for a chain, where each node is
+   * one deeper than the one before.
+   */
+  depths?: number[]
   /** Rows in the result. */
   rows: number
   /** Heap pages the query goes through (reads or finds in shared buffers), if the example talks about them. */
@@ -39,7 +46,7 @@ export interface ExampleStep {
 }
 
 export interface Example {
-  /** The number docs/DATA.md gives it, 1 to 12. */
+  /** The number docs/DATA.md gives it. */
   id: number
   /** The concept it shows, e.g. "Primary-key lookup". */
   title: string
@@ -353,6 +360,29 @@ export const EXAMPLES: Example[] = [
       },
     ],
   },
+  {
+    id: 13,
+    title: 'Nested loop join',
+    description:
+      'For each customer named Hawkins, Postgres searches the index on orders again, for that customer’s id: the inner side of the join runs once per outer row.',
+    steps: [
+      {
+        note: 'A bitmap scan finds the customers (the outer side). For each one, the Nested Loop runs the Index Scan on orders again, with the customer’s id in its Index Cond.',
+        sql: `SELECT c.first_name, c.last_name, o.id, o.order_date FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.last_name = 'Hawkins'`,
+        expect: {
+          plan: [
+            'Nested Loop',
+            'Bitmap Heap Scan on customers c',
+            'Bitmap Index Scan on customers_last_name_first_name_idx',
+            'Index Scan using orders_customer_id_order_date_idx on orders o',
+          ],
+          depths: [0, 1, 2, 1],
+          rows: 197,
+          heapPages: 202,
+        },
+      },
+    ],
+  },
 ]
 
 /**
@@ -392,7 +422,10 @@ function expectedPlanComment(expect: ExpectedPlan): string[] {
     const { first, again } = expect.heapFetches
     facts.push(first === again ? `Heap Fetches ${first}` : `Heap Fetches ${first}; ${again} on later runs`)
   }
-  const nodes = expect.plan.map((title, depth) => (depth === 0 ? title : `${'      '.repeat(depth - 1)}->  ${title}`))
+  const nodes = expect.plan.map((title, i) => {
+    const depth = expect.depths?.[i] ?? i
+    return depth === 0 ? title : `${'      '.repeat(depth - 1)}->  ${title}`
+  })
   return [`-- Expected plan (${facts.join(', ')}):`, ...nodes.map((node) => `--   ${node}`)]
 }
 

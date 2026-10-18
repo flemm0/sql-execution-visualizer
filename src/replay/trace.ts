@@ -206,8 +206,46 @@ export interface RowEmitEvent {
   type: 'row.emit'
   node: number
   row: RowRef
+  /**
+   * For a row a join makes: the rows from its outer side that `row`, from its
+   * inner side, is joined with, one per table, in plan order. The whole
+   * joined row is these, then `row`. Absent for a row of one table.
+   */
+  outer?: RowRef[]
   /** Which row of the result it becomes, counting from 0; null when it goes to a parent node. */
   resultIndex: number | null
+}
+
+/**
+ * A Nested Loop has a row from its outer side, and runs its inner side again
+ * for it: one loop. The inner side's events follow, until its node.finish.
+ * Where the inner side's conditions name a column of the outer row (an Index
+ * Cond like o.customer_id = c.id), the row's value is its parameter for this
+ * loop.
+ */
+export interface JoinLoopEvent {
+  type: 'join.loop'
+  node: number
+  /** Which loop this is, counting from 1. */
+  loop: number
+  /** The outer row, one row per table, in plan order. */
+  outer: RowRef[]
+  /** The values the inner side uses from it, as Postgres writes them, e.g. { name: "c.id", value: "4242" } (null for NULL). */
+  params: { name: string; value: string | null }[]
+}
+
+/**
+ * A Nested Loop checks its Join Filter on an outer row and a row its inner
+ * side passed up. The pair goes on (a row.emit follows) only if it passes.
+ */
+export interface JoinFilterEvent {
+  type: 'join.filter'
+  node: number
+  /** The outer row, one row per table, in plan order. */
+  outer: RowRef[]
+  /** The inner row. */
+  row: RowRef
+  matched: boolean
 }
 
 /**
@@ -284,6 +322,8 @@ export type TraceEvent =
   | HeapTupleEvent
   | VisibilityCheckEvent
   | RowEmitEvent
+  | JoinLoopEvent
+  | JoinFilterEvent
   | SortHeapEvent
   | SortKeepEvent
   | SortDiscardEvent

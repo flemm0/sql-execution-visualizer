@@ -725,3 +725,91 @@ describe('shortKey', () => {
     expect(shortKey('(lower(c.email))')).toBe('lower(c.email)')
   })
 })
+
+describe('a Nested Loop', () => {
+  const CUSTOMERS = 30
+  const loopRelations: Trace['relations'] = [...relations, { id: CUSTOMERS, name: 'customers', kind: 'table', pages: 126 }]
+  const customer = (block: number, offset: number) => ({ relation: CUSTOMERS, block, offset })
+  const joinNodes = new Map<number, NodeInfo>([
+    [0, { title: 'Nested Loop', hasFilter: false }],
+    [1, { title: 'Seq Scan on customers c', hasFilter: true, parent: 0 }],
+    [2, { title: 'Index Scan using orders_pkey on orders o', hasFilter: false, parent: 0 }],
+  ])
+  /** Two customers from one page; the first has one order, the second none. */
+  const join: Trace = {
+    relations: loopRelations,
+    events: [
+      { type: 'node.start', node: 0 },
+      { type: 'node.start', node: 1 },
+      { type: 'buffer.read', node: 1, page: { relation: CUSTOMERS, block: 5 } },
+      { type: 'heap.page', node: 1, page: { relation: CUSTOMERS, block: 5 }, visibleRows: 80, matchedRows: 2 },
+      { type: 'row.emit', node: 1, row: customer(5, 3), resultIndex: null },
+      { type: 'join.loop', node: 0, loop: 1, outer: [customer(5, 3)], params: [{ name: 'c.id', value: '42' }] },
+      { type: 'node.start', node: 2 },
+      { type: 'index.search', node: 2, index: INDEX },
+      { type: 'buffer.read', node: 2, page: indexPage(57) },
+      { type: 'index.visit', node: 2, page: indexPage(57), level: 0, downlink: null },
+      { type: 'index.entry', node: 2, page: indexPage(57), offset: 7, key: ['42'], row: row(5, 4) },
+      { type: 'buffer.read', node: 2, page: heapPage(5) },
+      { type: 'heap.tuple', node: 2, row: row(5, 4), visible: row(5, 4), matched: true },
+      { type: 'row.emit', node: 2, row: row(5, 4), resultIndex: null },
+      { type: 'row.emit', node: 0, row: row(5, 4), outer: [customer(5, 3)], resultIndex: 0 },
+      { type: 'node.finish', node: 2 },
+      { type: 'row.emit', node: 1, row: customer(5, 9), resultIndex: null },
+      { type: 'join.loop', node: 0, loop: 2, outer: [customer(5, 9)], params: [{ name: 'c.id', value: '43' }] },
+      { type: 'node.start', node: 2 },
+      { type: 'index.search', node: 2, index: INDEX },
+      { type: 'buffer.hit', node: 2, page: indexPage(57) },
+      { type: 'index.visit', node: 2, page: indexPage(57), level: 0, downlink: null },
+      { type: 'node.finish', node: 2 },
+      { type: 'node.finish', node: 1 },
+      { type: 'node.finish', node: 0 },
+    ],
+    indexPages: [],
+    sorts: [],
+    limits: [],
+    heapPages: [],
+  }
+  const caption = (position: number) => stateAt(join, joinNodes, position).caption
+
+  it('says each loop runs the inner side again with the outer row’s values, and names the tables of a joined row', () => {
+    expect(caption(6)).toBe(
+      'Loop 1: Nested Loop has row (5,3) from Seq Scan on customers c, so it runs Index Scan using orders_pkey on orders o, with the row’s values: c.id = 42.',
+    )
+    expect(caption(18)).toBe(
+      'Loop 2: Nested Loop has row (5,9) from Seq Scan on customers c, so it runs Index Scan using orders_pkey on orders o again, with the row’s values: c.id = 43.',
+    )
+    expect(caption(15)).toBe('The joined row customers (5,3) + orders (5,4) goes to the result as row 1.')
+    expect(caption(25)).toBe('Nested Loop has no more rows: it sent 1 row to the result.')
+  })
+
+  it('works the inner side again in each loop, and counts searches per index', () => {
+    expect(stateAt(join, joinNodes, 19).working).toEqual([0, 1, 2])
+    expect(stateAt(join, joinNodes, 20).index?.searches).toBe(2)
+    expect(nodeProgressAt(join, 25).get(2)).toEqual({ status: 'done', rows: 1 })
+  })
+
+  it('marks only the first table’s pages on the mini-map, though the other table has a page 5 too', () => {
+    const state = stateAt(join, joinNodes, 25)
+    expect(state.table?.name).toBe('customers')
+    expect([...state.pageMarks]).toEqual([[5, 'result']])
+    const before = stateAt(join, joinNodes, 4)
+    expect([...before.pageMarks]).toEqual([[5, 'touched']])
+  })
+
+  it('says whether a pair passes the Join Filter', () => {
+    const filtered: Trace = {
+      ...join,
+      events: [
+        { type: 'join.filter', node: 0, outer: [customer(5, 3)], row: row(5, 4), matched: true },
+        { type: 'join.filter', node: 0, outer: [customer(5, 3)], row: row(5, 6), matched: false },
+      ],
+    }
+    expect(stateAt(filtered, joinNodes, 1).caption).toBe(
+      'Nested Loop checks its Join Filter on customers (5,3) with orders (5,4): it passes, so the joined row goes on.',
+    )
+    expect(stateAt(filtered, joinNodes, 2).caption).toBe(
+      'Nested Loop checks its Join Filter on customers (5,3) with orders (5,6): it fails, so the pair is dropped.',
+    )
+  })
+})

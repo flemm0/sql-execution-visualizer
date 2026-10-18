@@ -189,8 +189,10 @@ function carriesOn(unit: Building, event: TraceEvent, flash: boolean): boolean {
       return unit.scanned.has(`${event.node}/${event.row.relation}/${event.row.block}`) || !unit.emitted.has(event.node)
     case 'sort.keep':
       return !flash && last.type === 'row.emit'
+    // A row dropped or skipped, or a Nested Loop checking its Join Filter on the row its inner side just passed up.
     case 'sort.discard':
     case 'limit.skip':
+    case 'join.filter':
       return last.type === 'row.emit'
     default:
       return false

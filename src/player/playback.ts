@@ -416,6 +416,9 @@ function apply(state: PlaybackState, event: TraceEvent, context: Context) {
 
   switch (event.type) {
     case 'node.start': {
+      // A Nested Loop's inner side starts again for each outer row; a loop it was stopped in is over.
+      const again = working.lastIndexOf(event.node)
+      if (again >= 0) working.splice(again)
       working.push(event.node)
       state.activeNode = event.node
       const limit = context.limits.get(event.node)
@@ -425,10 +428,13 @@ function apply(state: PlaybackState, event: TraceEvent, context: Context) {
       break
     }
 
-    case 'node.finish':
-      working.splice(working.lastIndexOf(event.node), 1)
+    case 'node.finish': {
+      // Nodes below it that were stopped in their last loop (an Inner Unique join's) are done too.
+      const at = working.lastIndexOf(event.node)
+      if (at >= 0) working.splice(at)
       state.activeNode = working.at(-1) ?? null
       break
+    }
 
     case 'buffer.hit':
     case 'buffer.read': {
@@ -448,12 +454,12 @@ function apply(state: PlaybackState, event: TraceEvent, context: Context) {
       }
       // A page read ahead that the scan never got to: it isn't the page being read now.
       if (event.ahead === true) {
-        if (!state.pageMarks.has(event.page.block)) state.pageMarks.set(event.page.block, 'ahead')
+        if (onMiniMap(state, event.page) && !state.pageMarks.has(event.page.block)) state.pageMarks.set(event.page.block, 'ahead')
         break
       }
       if (relations.get(event.page.relation)?.kind === 'table' && event.page.fork === undefined) {
         const heap = enterHeapPage(state, event.page, event.node)
-        markTouched(state, event.page.block)
+        markTouched(state, event.page)
         // A bitmap heap scan reading the next page its bitmap marks.
         const bitmap = state.bitmap
         const marked = bitmap?.pages.get(event.page.block)
@@ -470,24 +476,27 @@ function apply(state: PlaybackState, event: TraceEvent, context: Context) {
       heap.visibleRows = event.visibleRows
       heap.matchedRows = event.matchedRows
       heap.checkedRows = event.checkedRows ?? null
-      markTouched(state, event.page.block)
+      markTouched(state, event.page)
       break
     }
 
-    case 'index.search':
+    case 'index.search': {
+      // A join's scans take turns with their indexes: counts are per index.
+      const same = state.index?.index.id === event.index ? state.index : null
       state.index = {
         index: relations.get(event.index) ?? { id: event.index, name: `index ${event.index}`, kind: 'index', pages: 0 },
         backward: event.backward === true,
-        searches: (state.index?.searches ?? 0) + 1,
+        searches: (same?.searches ?? 0) + 1,
         path: [],
         leaf: null,
         entries: [],
         entryCount: 0,
         matchedOffsets: [],
-        markedDead: state.index?.markedDead ?? 0,
-        deadEntries: state.index?.deadEntries ?? new Set(),
+        markedDead: same?.markedDead ?? 0,
+        deadEntries: same?.deadEntries ?? new Set(),
       }
       break
+    }
 
     case 'index.visit': {
       const view = state.index
@@ -535,7 +544,7 @@ function apply(state: PlaybackState, event: TraceEvent, context: Context) {
       const heap = enterHeapPage(state, event.page, event.node)
       heap.allVisible = event.allVisible
       if (event.allVisible) {
-        state.pageMarks.set(event.page.block, 'fromIndex')
+        if (onMiniMap(state, event.page)) state.pageMarks.set(event.page.block, 'fromIndex')
         if (event.matched === false) {
           heap.rowCount++
           heap.rows = latest(heap.rows, { row: event.row, visible: null, outcome: 'rejected', resultIndex: null, to: null })
@@ -589,8 +598,11 @@ function apply(state: PlaybackState, event: TraceEvent, context: Context) {
       }
       if (event.resultIndex !== null) {
         state.resultRows++
-        // A page the scan didn't read keeps its mark.
-        if (state.pageMarks.get(event.row.block) !== 'fromIndex') state.pageMarks.set(event.row.block, 'result')
+        // A joined row is a row of each table; the mini-map shows one of them.
+        for (const row of [...(event.outer ?? []), event.row]) {
+          // A page the scan didn't read keeps its mark.
+          if (onMiniMap(state, row) && state.pageMarks.get(row.block) !== 'fromIndex') state.pageMarks.set(row.block, 'result')
+        }
       }
       break
     }
@@ -681,10 +693,20 @@ function rowKey(row: RowRef) {
   return `${row.relation}/${row.block}/${row.offset}`
 }
 
+/**
+ * Whether a page (or a row's page) is the mini-map's: a page of the table
+ * the heap zone shows. A join reads other tables' pages too, numbered from 0
+ * as well.
+ */
+function onMiniMap(state: PlaybackState, page: { relation: number; fork?: 'vm' }) {
+  return page.relation === state.table?.id && page.fork === undefined
+}
+
 /** Marks a heap page as read, unless it already says more (it gave rows to the result, or the visibility map spared it). */
-function markTouched(state: PlaybackState, block: number) {
-  const mark = state.pageMarks.get(block)
-  if (mark === undefined || mark === 'bitmap') state.pageMarks.set(block, 'touched')
+function markTouched(state: PlaybackState, page: PageRef) {
+  if (!onMiniMap(state, page)) return
+  const mark = state.pageMarks.get(page.block)
+  if (mark === undefined || mark === 'bitmap') state.pageMarks.set(page.block, 'touched')
 }
 
 /** Adds a row to the bitmap `node` builds, and marks its page on the mini-map. */
@@ -695,7 +717,7 @@ function markInBitmap(state: PlaybackState, node: number, row: RowRef) {
     state.bitmap.pages.set(row.block, [...offsets, row.offset])
     state.bitmap.rows++
   }
-  if (!state.pageMarks.has(row.block)) state.pageMarks.set(row.block, 'bitmap')
+  if (onMiniMap(state, row) && !state.pageMarks.has(row.block)) state.pageMarks.set(row.block, 'bitmap')
 }
 
 /** The version of a fetched row the query sees, when an UPDATE put a newer one on the same page; null otherwise. */
@@ -847,10 +869,32 @@ function describe(event: TraceEvent, state: PlaybackState, context: Context): st
       return event.matched ? `${skip}, and they pass the filter.` : `${skip}. Its values fail the filter, so it’s rejected.`
     }
 
+    case 'join.loop': {
+      const [outer, inner] = childrenOf(nodes, event.node)
+      const from = outer === undefined ? '' : ` from ${outer}`
+      const again = event.loop === 1 ? '' : ' again'
+      const runs = `Loop ${integer.format(event.loop)}: ${title} has row ${joinedName(event.outer, relations)}${from}, so it runs ${inner ?? 'its inner side'}${again}`
+      if (event.params.length === 0) return `${runs}, from the start, to pair the row with each row it finds.`
+      const values = event.params.map((param) => `${param.name} = ${param.value ?? 'NULL'}`).join(', ')
+      return `${runs}, with the row’s values: ${values}.`
+    }
+
+    case 'join.filter': {
+      const pair = `${joinedName(event.outer, relations, true)} with ${joinedName([event.row], relations, true)}`
+      return event.matched
+        ? `${title} checks its Join Filter on ${pair}: it passes, so the joined row goes on.`
+        : `${title} checks its Join Filter on ${pair}: it fails, so the pair is dropped.`
+    }
+
     case 'row.emit': {
       const sort = context.sorts.get(event.node)
       // A Sort passes its rows on in sorted order.
-      const row = sort === undefined ? `Row ${rowName(event.row)}` : `Row ${rowName(event.row)}, ${ordinal(sort.view.passed - 1)} in sort order,`
+      const row =
+        event.outer !== undefined
+          ? `The joined row ${joinedName([...event.outer, event.row], relations)}`
+          : sort === undefined
+            ? `Row ${rowName(event.row)}`
+            : `Row ${rowName(event.row)}, ${ordinal(sort.view.passed - 1)} in sort order,`
       if (event.resultIndex !== null) {
         const limit = state.limit?.node === event.node ? state.limit : null
         const of = limit?.count != null ? ` (${integer.format(limit.passed)} of the Limit’s ${integer.format(limit.count)})` : ''
@@ -966,6 +1010,23 @@ export function pageName(page: PageRef, relations: Map<number, TraceRelation>): 
 export function shortPageName(page: PageRef, relations: Map<number, TraceRelation>): string {
   if (page.fork === 'vm') return `vm${page.block}`
   return `${relations.get(page.relation)?.kind === 'index' ? 'i' : 'h'}${page.block}`
+}
+
+/**
+ * A row of each table, e.g. "customers (12,3) + orders (212,4)"; a row of
+ * one table alone is just its ctid, unless `named`.
+ */
+function joinedName(rows: RowRef[], relations: Map<number, TraceRelation>, named = false): string {
+  if (rows.length === 1 && !named) return rowName(rows[0])
+  return rows.map((row) => `${relations.get(row.relation)?.name ?? 'table'} ${rowName(row)}`).join(' + ')
+}
+
+/** The titles of a node's children, in plan order (a join's outer side first). */
+function childrenOf(nodes: Map<number, NodeInfo>, parent: number): string[] {
+  return [...nodes.entries()]
+    .filter(([, info]) => info.parent === parent)
+    .sort(([a], [b]) => a - b)
+    .map(([, info]) => info.title)
 }
 
 /** A row's place as Postgres writes a ctid: "(212,4)". */

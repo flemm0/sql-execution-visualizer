@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { openApp, runSql } from './editor'
+import { pauseAtStart } from './player'
 
 /*
  * Condensing (docs/UX.md#playback, ADR 0042): a long trace plays in about 30
@@ -33,8 +34,7 @@ test('example 2 plays condensed: a stretch of pages expands into its steps, and 
   await openApp(page)
   await runSql(page, 'SELECT * FROM order_items WHERE product_id = 42;')
   await expect(viz(page)).toBeVisible()
-  await control(page, 'Pause').click()
-  await control(page, 'To the start').click()
+  await pauseAtStart(page)
 
   // 2,747 events in at most 900 steps: 30 seconds at the default 30 steps a second.
   const player = page.getByTestId('player')
@@ -85,8 +85,7 @@ test('example 2 plays condensed: a stretch of pages expands into its steps, and 
 test('example 2’s matching rows still flash one at a time, and the result follows them back and forth', async ({ page }) => {
   await openApp(page)
   await runSql(page, 'SELECT * FROM order_items WHERE product_id = 42;')
-  await control(page, 'Pause').click()
-  await control(page, 'To the start').click()
+  await pauseAtStart(page)
   await expect(page.getByTestId('rows-filling')).toContainText('0 of 189 so far')
 
   // Step on until the first row goes to the result: a step of its own.

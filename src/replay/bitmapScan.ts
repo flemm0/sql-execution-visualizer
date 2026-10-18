@@ -1,9 +1,8 @@
-import type { PGliteInterface } from '@electric-sql/pglite'
 import type { Relation, Tid } from '../db/inspector'
 import type { PlanNode } from '../db/plan'
 import type { IndexStep } from './btreeScan'
 import type { SharedBuffers } from './buffers'
-import { entryTids, fetchRows, tidText, type FetchedRow, type IndexWalk } from './indexScan'
+import { tidText, type FetchedRow } from './indexScan'
 import { unusedReadAheadEvents } from './readStream'
 import type { TraceEvent } from './trace'
 
@@ -28,33 +27,13 @@ import type { TraceEvent } from './trace'
  * replayQuery reports a lossy bitmap as not supported.
  *
  * Step 1's walk runs before the query does (walkIndexScan), like an index
- * scan's; the rest after (replayBitmapScan).
+ * scan's; the rest after: fetchRows (indexScan.ts) checks the marked rows,
+ * then bitmapScanEvents makes the trace.
  *
  * Under a Limit, the heap scan stops as soon as it has passed up the rows the
  * Limit needs. By then it has asked for pages ahead that it won't use
  * (readStream.ts).
  */
-
-/**
- * The trace of a Bitmap Heap Scan (`heapNode`) over a Bitmap Index Scan
- * (`indexNode`), from the index scan's walk, after the query has run: asks
- * Postgres which version of each marked row the query sees, and whether it
- * passes the Filter. `rowsNeeded`: the most rows its parent will ask for (a
- * Limit's), null for all.
- */
-export async function replayBitmapScan(
-  db: PGliteInterface,
-  heapNode: PlanNode,
-  indexNode: PlanNode,
-  table: Relation,
-  index: Relation,
-  walk: IndexWalk,
-  buffers: SharedBuffers,
-  rowsNeeded: number | null,
-): Promise<TraceEvent[]> {
-  const rows = await fetchRows(db, heapNode, table, entryTids(walk))
-  return [...bitmapScanEvents(heapNode, indexNode, table, index, walk.steps, rows, buffers, rowsNeeded)]
-}
 
 /**
  * The rows a bitmap marks, by heap page, in physical order: pages by
